@@ -34,6 +34,11 @@
     </header>
 
     <main class="content">
+      <section class="requests-section" id="requestsSection" hidden>
+        <div class="section-head"><h2>Incoming requests</h2></div>
+        <div class="request-list" id="requestList"></div>
+      </section>
+
       <section class="devices-section">
         <div class="section-head">
           <h2>Devices on your network</h2>
@@ -78,6 +83,10 @@
         <input type="checkbox" id="inpAutoLaunch" />
         <span>Start automatically with the computer (runs in the tray)</span>
       </label>
+      <div class="trusted-row" id="trustedRow" hidden>
+        <span id="trustedText"></span>
+        <button class="link-btn" id="btnForgetTrusted">Ask me again for all devices</button>
+      </div>
       <div class="modal-actions">
         <button class="btn secondary" id="btnCloseSettings">Close</button>
         <button class="btn primary" id="btnSaveSettings">Save</button>

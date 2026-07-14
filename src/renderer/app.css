@@ -92,6 +92,42 @@ body {
 }
 .link-btn:hover { text-decoration: underline; }
 
+/* --------------------------------------------------------------- requests */
+
+.request-list { display: flex; flex-direction: column; gap: 10px; }
+
+.request-item {
+  background: linear-gradient(135deg, rgba(79,140,255,0.10), rgba(157,92,255,0.10));
+  border: 1px solid var(--accent-1);
+  border-radius: 14px;
+  padding: 16px 18px;
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  gap: 14px;
+  align-items: center;
+  animation: slideIn 0.2s ease-out;
+}
+@keyframes slideIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+
+.request-item .r-icon {
+  width: 44px; height: 44px; border-radius: 12px;
+  display: grid; place-items: center;
+  background: linear-gradient(135deg, var(--accent-1), var(--accent-2));
+  color: #fff; font-size: 20px;
+}
+.r-title { font-size: 14px; font-weight: 600; }
+.r-title b { color: var(--accent-1); }
+.r-sub { font-size: 11.5px; color: var(--text-dim); margin-top: 3px; font-variant-numeric: tabular-nums; }
+.r-actions { display: flex; align-items: center; gap: 8px; }
+.r-trust {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 11px; color: var(--text-dim);
+  margin-right: 4px; cursor: pointer;
+}
+.r-trust input { accent-color: var(--accent-1); }
+.btn.danger { background: transparent; color: var(--bad); border: 1px solid rgba(255,93,115,0.4); }
+.btn.danger:hover { background: rgba(255,93,115,0.1); }
+
 /* ---------------------------------------------------------------- devices */
 
 .device-grid {
@@ -310,6 +346,13 @@ body {
   display: flex; justify-content: flex-end; gap: 10px;
   margin-top: 22px;
 }
+
+.trusted-row {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 11.5px; color: var(--text-dim);
+  margin-top: 10px;
+}
+.trusted-row .link-btn { margin-left: 0; font-size: 11.5px; }
 
 /* -------------------------------------------------------------- scrollbar */
 

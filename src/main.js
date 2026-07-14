@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell, nativeImage, Notification } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -17,6 +17,7 @@ let quitting = false;
 
 const transfers = new Map(); // id -> record
 const sendRegistry = new Map(); // id -> { cancel }
+const pendingRequests = new Map(); // id -> { info, resolve, notification }
 
 /* ---------------------------------------------------------------- settings */
 
@@ -30,6 +31,7 @@ function loadSettings() {
     deviceName: os.hostname(),
     downloadDir: path.join(app.getPath('downloads'), 'FluxDrop'),
     autoLaunch: true,
+    trustedDevices: [], // device ids that skip the approval prompt
   };
   try {
     const raw = JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
@@ -136,10 +138,56 @@ function pushTransfer(record) {
 
 /* ----------------------------------------------------------------- network */
 
+function fmtBytes(n) {
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0;
+  let v = n;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i += 1; }
+  return `${v >= 100 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+/**
+ * Ask the user whether to accept an incoming transfer.
+ * Trusted devices are auto-accepted. Otherwise the request is shown in the
+ * window (and as a desktop notification) until answered or timed out.
+ */
+function askApproval(info) {
+  if (settings.trustedDevices.includes(info.peerId)) return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok, trust) => {
+      if (settled) return;
+      settled = true;
+      if (ok && trust && info.peerId && !settings.trustedDevices.includes(info.peerId)) {
+        settings.trustedDevices.push(info.peerId);
+        saveSettings();
+      }
+      pendingRequests.delete(info.id);
+      sendToUI('request-resolved', info.id);
+      resolve(ok);
+    };
+
+    pendingRequests.set(info.id, { info, finish });
+    sendToUI('request', info);
+    showWindow();
+
+    if (Notification.isSupported()) {
+      const n = new Notification({
+        title: `${info.peerName} wants to send you files`,
+        body: `${info.label} · ${fmtBytes(info.totalBytes)} — click to review`,
+        icon: iconPath('icon.png'),
+      });
+      n.on('click', showWindow);
+      n.show();
+    }
+  });
+}
+
 async function startNetwork() {
   transferServer = new TransferServer({
     getDownloadDir: () => settings.downloadDir,
-    selfId: settings.deviceId,
+    shouldAccept: askApproval,
   });
   transferServer.on('transfer', pushTransfer);
   transferServer.on('error', (err) => console.error('transfer server:', err.message));
@@ -179,7 +227,9 @@ function setupIpc() {
       deviceName: settings.deviceName,
       downloadDir: settings.downloadDir,
       autoLaunch: settings.autoLaunch,
+      trustedCount: settings.trustedDevices.length,
     },
+    requests: [...pendingRequests.values()].map((p) => p.info),
     self: {
       id: settings.deviceId,
       name: settings.deviceName,
@@ -247,8 +297,21 @@ function setupIpc() {
 
   ipcMain.handle('cancel-transfer', (e, id) => {
     const entry = sendRegistry.get(id);
-    if (entry) entry.cancel();
-    return { ok: !!entry };
+    if (entry) { entry.cancel(); return { ok: true }; }
+    return { ok: transferServer.cancel(id) }; // incoming transfer
+  });
+
+  ipcMain.handle('respond-request', (e, { id, accept, trust }) => {
+    const pending = pendingRequests.get(id);
+    if (!pending) return { ok: false };
+    pending.finish(!!accept, !!trust);
+    return { ok: true };
+  });
+
+  ipcMain.handle('forget-trusted', () => {
+    settings.trustedDevices = [];
+    saveSettings();
+    return { ok: true };
   });
 }
 
@@ -276,8 +339,25 @@ if (!gotLock) {
       }, 4000);
     }
 
+    // test hook: --click=<css selector> clicks an element once it appears
+    const clickArg = process.argv.find((a) => a.startsWith('--click='));
+    if (clickArg) {
+      const sel = clickArg.slice('--click='.length);
+      const timer = setInterval(async () => {
+        try {
+          const hit = await win.webContents.executeJavaScript(
+            `(() => { const el = document.querySelector(${JSON.stringify(sel)});
+                      if (!el) return false; el.click(); return true; })()`
+          );
+          if (hit) { clearInterval(timer); console.log('CLICKED ' + sel); }
+        } catch (_) {}
+      }, 400);
+    }
+
     const shotArg = process.argv.find((a) => a.startsWith('--shot='));
     if (shotArg) {
+      const delayArg = process.argv.find((a) => a.startsWith('--shot-delay='));
+      const shotDelay = delayArg ? Number(delayArg.split('=')[1]) : 3000;
       setTimeout(async () => {
         try {
           const img = await win.webContents.capturePage();
@@ -288,7 +368,7 @@ if (!gotLock) {
         }
         quitting = true;
         app.quit();
-      }, 3000);
+      }, shotDelay);
     }
   }).catch((err) => {
     console.error('startup failed:', err);

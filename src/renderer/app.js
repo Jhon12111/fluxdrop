@@ -4,6 +4,7 @@
 const state = {
   devices: [],
   transfers: new Map(), // id -> record
+  requests: new Map(),  // id -> info
   speeds: new Map(),    // id -> { t, bytes, speed }
   settings: null,
   self: null,
@@ -48,6 +49,47 @@ function platformIcon(platform) {
     return '<svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M17.05 12.54c-.03-2.42 1.98-3.58 2.07-3.64-1.13-1.65-2.88-1.88-3.5-1.9-1.48-.15-2.9.88-3.65.88-.76 0-1.92-.86-3.16-.84-1.62.02-3.12.95-3.96 2.4-1.7 2.94-.43 7.28 1.21 9.66.81 1.17 1.77 2.47 3.03 2.42 1.22-.05 1.68-.78 3.15-.78s1.89.78 3.17.76c1.31-.03 2.14-1.18 2.94-2.36.93-1.35 1.31-2.66 1.33-2.73-.03-.01-2.55-.98-2.63-3.87zm-2.4-7.1c.67-.82 1.13-1.95 1-3.08-.97.04-2.15.65-2.85 1.46-.62.72-1.17 1.88-1.02 2.98 1.08.09 2.19-.55 2.87-1.36z"/></svg>';
   }
   return '<svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M3 5.5 10.5 4.4v7.1H3V5.5zm0 13 7.5 1.1v-7H3v5.9zM11.5 4.2 21 3v8.5h-9.5V4.2zm0 15.6L21 21v-8.5h-9.5v7.3z"/></svg>';
+}
+
+/* --------------------------------------------------------------- requests */
+
+function renderRequests() {
+  const section = $('requestsSection');
+  const list = $('requestList');
+  const items = [...state.requests.values()];
+  section.hidden = items.length === 0;
+  list.innerHTML = '';
+
+  for (const info of items) {
+    const el = document.createElement('div');
+    el.className = 'request-item';
+    el.innerHTML = `
+      <div class="r-icon">↓</div>
+      <div>
+        <div class="r-title"><b>${esc(info.peerName)}</b> wants to send you ${esc(info.label)}</div>
+        <div class="r-sub">${info.fileCount} file${info.fileCount === 1 ? '' : 's'} · ${fmtBytes(info.totalBytes)} · from ${esc(info.ip)}</div>
+      </div>
+      <div class="r-actions">
+        <label class="r-trust" title="Always accept files from this device without asking">
+          <input type="checkbox" data-role="trust" /> Always allow
+        </label>
+        <button class="btn danger" data-act="decline">Decline</button>
+        <button class="btn primary" data-act="accept">Accept</button>
+      </div>
+    `;
+    const trust = () => el.querySelector('[data-role="trust"]').checked;
+    el.querySelector('[data-act="accept"]').addEventListener('click', () => {
+      flux.respondRequest(info.id, true, trust());
+      state.requests.delete(info.id);
+      renderRequests();
+    });
+    el.querySelector('[data-act="decline"]').addEventListener('click', () => {
+      flux.respondRequest(info.id, false, false);
+      state.requests.delete(info.id);
+      renderRequests();
+    });
+    list.appendChild(el);
+  }
 }
 
 /* ---------------------------------------------------------------- devices */
@@ -121,10 +163,12 @@ function renderTransfers() {
     const pct = r.totalBytes > 0 ? Math.min(100, (r.bytes / r.totalBytes) * 100) : 0;
     const isRecv = r.direction === 'recv';
     const stateLabel = {
+      pending: 'Waiting for the other device to accept…',
       active: `${fmtBytes(r.bytes)} of ${fmtBytes(r.totalBytes)} · ${fmtEta(r, speed)}`,
       done: 'Completed',
       error: `Failed — ${r.error || 'unknown error'}`,
       canceled: 'Canceled',
+      declined: 'Declined',
     }[r.state] || r.state;
 
     const item = document.createElement('div');
@@ -134,11 +178,11 @@ function renderTransfers() {
       <div class="t-main">
         <div class="t-title">${esc(r.label)} ${isRecv ? 'from' : 'to'} ${esc(r.peerName)}</div>
         <div class="t-sub ${r.state}">${esc(stateLabel)}</div>
-        <div class="t-bar"><div class="t-bar-fill ${r.state === 'done' ? 'done' : ''} ${r.state === 'error' || r.state === 'canceled' ? 'error' : ''}" style="width:${r.state === 'done' ? 100 : pct}%"></div></div>
+        <div class="t-bar"><div class="t-bar-fill ${r.state === 'done' ? 'done' : ''} ${r.state === 'error' || r.state === 'canceled' || r.state === 'declined' ? 'error' : ''}" style="width:${r.state === 'done' ? 100 : pct}%"></div></div>
       </div>
       <div class="t-right">
         <div class="t-speed">${r.state === 'active' ? fmtSpeed(speed) : fmtBytes(r.totalBytes)}</div>
-        ${r.state === 'active' && r.direction === 'send'
+        ${r.state === 'active' || r.state === 'pending'
           ? `<button class="t-cancel" data-id="${r.id}">Cancel</button>`
           : `<div class="t-state ${r.state}">${r.state === 'done' ? '✓ ' + (isRecv ? 'Received' : 'Sent') : ''}</div>`}
       </div>
@@ -155,6 +199,9 @@ function openSettings() {
   $('inpName').value = state.settings.deviceName;
   $('inpDir').value = state.settings.downloadDir;
   $('inpAutoLaunch').checked = !!state.settings.autoLaunch;
+  const n = state.settings.trustedCount || 0;
+  $('trustedRow').hidden = n === 0;
+  $('trustedText').textContent = `${n} trusted device${n === 1 ? '' : 's'} skip the approval prompt.`;
   $('settingsModal').showModal();
 }
 
@@ -184,12 +231,24 @@ async function init() {
   state.self = st.self;
   state.devices = st.devices;
   for (const t of st.transfers) state.transfers.set(t.id, t);
+  for (const r of st.requests || []) state.requests.set(r.id, r);
 
   $('selfName').textContent = st.self.name;
   $('selfIp').textContent = `${st.self.ip} · v${st.self.version}`;
 
   renderDevices();
   renderTransfers();
+  renderRequests();
+
+  flux.onRequest((info) => {
+    state.requests.set(info.id, info);
+    renderRequests();
+  });
+
+  flux.onRequestResolved((id) => {
+    state.requests.delete(id);
+    renderRequests();
+  });
 
   flux.onDevices((devices) => {
     state.devices = devices;
@@ -209,6 +268,11 @@ async function init() {
   $('btnCloseSettings').addEventListener('click', () => $('settingsModal').close());
   $('btnSaveSettings').addEventListener('click', saveSettings);
   $('btnOpenDownloads').addEventListener('click', () => flux.openDownloads());
+  $('btnForgetTrusted').addEventListener('click', async () => {
+    await flux.forgetTrusted();
+    state.settings.trustedCount = 0;
+    $('trustedRow').hidden = true;
+  });
   $('btnChooseDir').addEventListener('click', async () => {
     const dir = await flux.chooseDownloadDir();
     $('inpDir').value = dir;

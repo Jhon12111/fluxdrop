@@ -1,7 +1,16 @@
 'use strict';
 /*
  * FluxDrop core — LAN device discovery (UDP broadcast) and
- * high-speed file transfer (raw TCP stream, length-prefixed JSON control frames).
+ * high-speed file transfer over multiple parallel TCP streams.
+ *
+ * Transfer protocol (v2):
+ *   control socket:  offer -> accept|reject -> (chunk headers + payload) -> done
+ *   data sockets:    join  -> (chunk headers + payload)
+ *
+ * Every file is split into fixed-size chunks that are pulled from one shared
+ * work queue by all streams, so a single large file parallelises just as well
+ * as many small ones. The receiver writes each chunk at its absolute offset.
+ *
  * No Electron dependencies: testable with plain Node.
  */
 const dgram = require('dgram');
@@ -17,8 +26,11 @@ const DEFAULT_TRANSFER_PORT = 52131;
 const PROTOCOL_VERSION = 1;
 const HEARTBEAT_MS = 2000;
 const DEVICE_TTL_MS = 7000;
-const READ_CHUNK = 4 * 1024 * 1024; // 4 MB read chunks for throughput
-const SOCKET_TIMEOUT_MS = 45000;
+const READ_CHUNK = 512 * 1024;          // socket/disk read granularity
+const CHUNK_SIZE = 8 * 1024 * 1024;     // work-queue chunk size
+const STREAMS = 4;                      // parallel TCP connections
+const SOCKET_TIMEOUT_MS = 60000;
+const APPROVAL_TIMEOUT_MS = 120000;
 
 /* ---------------------------------------------------------------- helpers */
 
@@ -27,9 +39,7 @@ function localIPv4Interfaces() {
   const ifaces = os.networkInterfaces();
   for (const name of Object.keys(ifaces)) {
     for (const info of ifaces[name] || []) {
-      if (info.family === 'IPv4' && !info.internal) {
-        out.push(info);
-      }
+      if (info.family === 'IPv4' && !info.internal) out.push(info);
     }
   }
   return out;
@@ -40,8 +50,7 @@ function broadcastAddresses() {
   for (const info of localIPv4Interfaces()) {
     const ip = info.address.split('.').map(Number);
     const mask = info.netmask.split('.').map(Number);
-    const bcast = ip.map((oct, i) => (oct & mask[i]) | (~mask[i] & 255));
-    addrs.add(bcast.join('.'));
+    addrs.add(ip.map((oct, i) => (oct & mask[i]) | (~mask[i] & 255)).join('.'));
   }
   return [...addrs];
 }
@@ -59,29 +68,71 @@ function frame(obj) {
   return Buffer.concat([head, body]);
 }
 
-/** Incremental parser for length-prefixed JSON frames mixed into a stream. */
+/**
+ * Incremental reader over a chunk queue. Never concatenates the whole
+ * backlog, so the payload path stays zero-copy even at multi-Gbps.
+ */
 class FrameReader {
   constructor() {
-    this.buf = Buffer.alloc(0);
+    this.chunks = [];
+    this.length = 0;
   }
   push(chunk) {
-    this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
+    this.chunks.push(chunk);
+    this.length += chunk.length;
   }
-  /** Try to read one frame. Returns object or null. */
+  _peek(n) {
+    if (this.length < n) return null;
+    if (this.chunks[0].length >= n) return this.chunks[0].subarray(0, n);
+    const buf = Buffer.allocUnsafe(n);
+    let off = 0;
+    for (const c of this.chunks) {
+      const take = Math.min(c.length, n - off);
+      c.copy(buf, off, 0, take);
+      off += take;
+      if (off === n) break;
+    }
+    return buf;
+  }
+  _consume(n) {
+    let left = n;
+    while (left > 0) {
+      const c = this.chunks[0];
+      if (c.length <= left) {
+        this.chunks.shift();
+        left -= c.length;
+        this.length -= c.length;
+      } else {
+        this.chunks[0] = c.subarray(left);
+        this.length -= left;
+        left = 0;
+      }
+    }
+  }
+  /** Try to read one JSON frame. Returns object or null. */
   next() {
-    if (this.buf.length < 4) return null;
-    const len = this.buf.readUInt32BE(0);
+    const head = this._peek(4);
+    if (!head) return null;
+    const len = head.readUInt32BE(0);
     if (len > 16 * 1024 * 1024) throw new Error('control frame too large');
-    if (this.buf.length < 4 + len) return null;
-    const body = this.buf.subarray(4, 4 + len);
-    this.buf = this.buf.subarray(4 + len);
+    if (this.length < 4 + len) return null;
+    this._consume(4);
+    const body = this._peek(len);
+    this._consume(len);
     return JSON.parse(body.toString('utf8'));
   }
-  /** Pull up to n raw bytes (for payload phase). */
+  /** Pull up to n raw bytes without copying. */
   takeRaw(n) {
-    if (this.buf.length === 0) return null;
-    const take = this.buf.subarray(0, Math.min(n, this.buf.length));
-    this.buf = this.buf.subarray(take.length);
+    if (this.length === 0 || n === 0) return null;
+    const c = this.chunks[0];
+    if (c.length <= n) {
+      this.chunks.shift();
+      this.length -= c.length;
+      return c;
+    }
+    const take = c.subarray(0, n);
+    this.chunks[0] = c.subarray(n);
+    this.length -= n;
     return take;
   }
 }
@@ -91,8 +142,11 @@ function sanitizeRelPath(rel) {
   if (!norm || path.isAbsolute(norm)) return null;
   const parts = norm.split('/').filter(Boolean);
   if (parts.some((p) => p === '..' || p === '.')) return null;
-  // strip characters invalid in Windows file names + control chars
-  const cleaned = parts.map((p) => Array.from(p).filter((ch) => ch.codePointAt(0) >= 32).join('').replace(/[<>:"|?*]/g, '_'));
+  const cleaned = parts.map((p) => Array.from(p)
+    .filter((ch) => ch.codePointAt(0) >= 32)
+    .join('')
+    .replace(/[<>:"|?*]/g, '_'));
+  if (cleaned.some((p) => p === '')) return null;
   return cleaned.join('/');
 }
 
@@ -113,6 +167,10 @@ function uniqueName(baseDir, name) {
   return candidate;
 }
 
+function labelFor(files) {
+  return files.length === 1 ? path.basename(files[0].rel) : `${files.length} items`;
+}
+
 /* -------------------------------------------------------------- discovery */
 
 /**
@@ -124,7 +182,7 @@ class Discovery extends EventEmitter {
   constructor(self) {
     super();
     this.self = self;
-    this.devices = new Map(); // id -> { id, name, platform, ip, port, lastSeen }
+    this.devices = new Map();
     this.sock = null;
     this.heartbeat = null;
     this.pruner = null;
@@ -134,10 +192,7 @@ class Discovery extends EventEmitter {
     return new Promise((resolve, reject) => {
       const sock = dgram.createSocket({ type: 'udp4', reuseAddr: true });
       this.sock = sock;
-      sock.on('error', (err) => {
-        this.emit('error', err);
-        reject(err);
-      });
+      sock.on('error', (err) => { this.emit('error', err); reject(err); });
       sock.on('message', (msg, rinfo) => this._onMessage(msg, rinfo));
       sock.bind(DISCOVERY_PORT, () => {
         try { sock.setBroadcast(true); } catch (_) {}
@@ -169,6 +224,7 @@ class Discovery extends EventEmitter {
   }
 
   _onMessage(msg, rinfo) {
+    if (!this.sock) return; // already stopped; ignore in-flight datagrams
     let data;
     try { data = JSON.parse(msg.toString('utf8')); } catch (_) { return; }
     if (!data || data.fluxdrop !== PROTOCOL_VERSION || !data.id) return;
@@ -187,10 +243,7 @@ class Discovery extends EventEmitter {
       port: Number(data.port) || DEFAULT_TRANSFER_PORT,
       lastSeen: Date.now(),
     });
-    if (!known) {
-      // reply directly so the new peer learns about us immediately
-      this.sock.send(this._payload('hi'), DISCOVERY_PORT, rinfo.address, () => {});
-    }
+    if (!known) this.sock.send(this._payload('hi'), DISCOVERY_PORT, rinfo.address, () => {});
     this._emitUpdate();
   }
 
@@ -198,22 +251,14 @@ class Discovery extends EventEmitter {
     const now = Date.now();
     let changed = false;
     for (const [id, dev] of this.devices) {
-      if (now - dev.lastSeen > DEVICE_TTL_MS) {
-        this.devices.delete(id);
-        changed = true;
-      }
+      if (now - dev.lastSeen > DEVICE_TTL_MS) { this.devices.delete(id); changed = true; }
     }
     if (changed) this._emitUpdate();
   }
 
-  _emitUpdate() {
-    this.emit('update', [...this.devices.values()]);
-  }
+  _emitUpdate() { this.emit('update', [...this.devices.values()]); }
 
-  updateSelf(patch) {
-    Object.assign(this.self, patch);
-    this.announce();
-  }
+  updateSelf(patch) { Object.assign(this.self, patch); this.announce(); }
 
   stop() {
     clearInterval(this.heartbeat);
@@ -235,18 +280,20 @@ class Discovery extends EventEmitter {
 /* --------------------------------------------------------------- receiver */
 
 /**
- * Listens for incoming transfers and writes files into downloadDir.
- * emits: 'transfer' (record snapshot), 'error'
- * Record: { id, direction:'recv', peerName, peerId, fileCount, totalBytes,
- *           bytes, state, label, error }
+ * Listens for incoming transfers.
+ * opts: {
+ *   getDownloadDir: () => string,
+ *   shouldAccept: async ({ id, peerName, peerId, ip, fileCount, totalBytes, label }) => boolean,
+ * }
+ * emits: 'transfer' (record snapshot), 'request' (pending info), 'error'
  */
 class TransferServer extends EventEmitter {
-  /** opts: { getDownloadDir: () => string, selfId: string } */
   constructor(opts) {
     super();
     this.opts = opts;
     this.server = null;
     this.port = null;
+    this.sessions = new Map(); // tid -> session
   }
 
   start(preferredPort = DEFAULT_TRANSFER_PORT) {
@@ -254,185 +301,307 @@ class TransferServer extends EventEmitter {
       const server = net.createServer((socket) => this._handle(socket));
       this.server = server;
       server.on('error', (err) => {
-        if (err.code === 'EADDRINUSE' && this.port === null) {
-          server.listen(0); // fall back to an ephemeral port
-        } else {
-          this.emit('error', err);
-          reject(err);
-        }
+        if (err.code === 'EADDRINUSE' && this.port === null) server.listen(0);
+        else { this.emit('error', err); reject(err); }
       });
-      server.on('listening', () => {
-        this.port = server.address().port;
-        resolve(this.port);
-      });
+      server.on('listening', () => { this.port = server.address().port; resolve(this.port); });
       server.listen(preferredPort);
     });
   }
 
   stop() {
+    for (const s of this.sessions.values()) s.destroy(new Error('server stopped'));
     if (this.server) { try { this.server.close(); } catch (_) {} }
   }
 
+  /** Cancel an in-flight incoming transfer. */
+  cancel(tid) {
+    const s = this.sessions.get(tid);
+    if (!s) return false;
+    s.cancel();
+    return true;
+  }
+
   _handle(socket) {
+    socket.setNoDelay(true);
     socket.setTimeout(SOCKET_TIMEOUT_MS);
     const reader = new FrameReader();
-    const state = {
-      phase: 'offer',
-      record: null,
-      manifest: null,
-      fileIdx: -1,
-      fileRemaining: 0,
-      ws: null,
-      rootMap: new Map(), // original top-level segment -> resolved unique name
-      destBase: null,
-      lastEmit: 0,
-      currentPartial: null,
-      pumping: false,
+    let session = null;
+    let bound = false;
+
+    const onFail = (err) => {
+      if (session) session.socketFailed(socket, err);
+      else { try { socket.destroy(); } catch (_) {} }
     };
 
-    const fail = (err) => {
-      if (state.ws) { try { state.ws.destroy(); } catch (_) {} }
-      if (state.currentPartial) { fs.promises.unlink(state.currentPartial).catch(() => {}); }
-      if (state.record && state.record.state === 'active') {
-        state.record.state = 'error';
-        state.record.error = err.message;
-        this.emit('transfer', { ...state.record });
-      }
-      try { socket.destroy(); } catch (_) {}
-    };
+    socket.on('timeout', () => onFail(new Error('connection timed out')));
+    socket.on('error', onFail);
+    socket.on('close', () => { if (session) session.socketClosed(socket); });
 
-    socket.on('timeout', () => fail(new Error('connection timed out')));
-    socket.on('error', (err) => fail(err));
+    const pump = () => {
+      if (!session) return;
+      session.pump(socket);
+    };
 
     socket.on('data', (chunk) => {
       reader.push(chunk);
-      if (state.pumping) return; // async pump already running; it will see new data
-      state.pumping = true;
-      this._drain(socket, reader, state)
-        .catch(fail)
-        .finally(() => { state.pumping = false; });
+      if (bound) { pump(); return; }
+      // first frame decides what this socket is
+      let first;
+      try { first = reader.next(); } catch (err) { return onFail(err); }
+      if (!first) return;
+      bound = true;
+      if (first.type === 'offer') {
+        this._startSession(socket, reader, first).then((s) => {
+          session = s;
+          if (s) s.pump(socket);
+        }).catch(onFail);
+      } else if (first.type === 'join') {
+        const s = this.sessions.get(first.tid);
+        if (!s || !s.accepted) return onFail(new Error('unknown transfer'));
+        session = s;
+        s.attach(socket, reader);
+        s.pump(socket);
+      } else {
+        onFail(new Error('bad handshake'));
+      }
     });
   }
 
-  /** Resolve destination absolute path for a manifest rel path. */
-  _resolveDest(state, rel) {
+  async _startSession(socket, reader, offer) {
+    if (!Array.isArray(offer.files)) throw new Error('bad offer');
+    const files = [];
+    let total = 0;
+    for (const f of offer.files) {
+      const rel = sanitizeRelPath(f.rel);
+      const size = Number(f.size);
+      if (rel === null || !Number.isFinite(size) || size < 0) throw new Error('bad manifest entry');
+      files.push({ rel, size, received: 0, fh: null, dest: null, opening: null });
+      total += size;
+    }
+
+    const tid = String(offer.tid || crypto.randomUUID());
+    const session = new RecvSession(this, tid, socket, reader, files, total, offer);
+    this.sessions.set(tid, session);
+
+    socket.pause();
+    const info = {
+      id: tid,
+      peerName: session.record.peerName,
+      peerId: session.record.peerId,
+      ip: socket.remoteAddress ? socket.remoteAddress.replace(/^::ffff:/, '') : '',
+      fileCount: files.length,
+      totalBytes: total,
+      label: session.record.label,
+    };
+    this.emit('request', info);
+
+    let approved = false;
+    try {
+      approved = await Promise.race([
+        Promise.resolve(this.opts.shouldAccept ? this.opts.shouldAccept(info) : true),
+        new Promise((res) => setTimeout(() => res(false), APPROVAL_TIMEOUT_MS)),
+      ]);
+    } catch (_) {
+      approved = false;
+    }
+
+    if (session.destroyed) return null;
+    if (!approved) {
+      try { socket.write(frame({ type: 'reject' })); socket.end(); } catch (_) {}
+      this.sessions.delete(tid);
+      session.record.state = 'declined';
+      session.record.error = 'Declined';
+      this.emit('transfer', { ...session.record });
+      return null;
+    }
+
+    await session.prepare();
+    if (session.destroyed) return null;
+    session.accepted = true;
+    socket.write(frame({ type: 'accept', tid, streams: STREAMS }));
+    socket.resume();
+    this.emit('transfer', { ...session.record });
+    return session;
+  }
+}
+
+/** One incoming transfer, spread over several sockets. */
+class RecvSession {
+  constructor(server, tid, controlSocket, reader, files, totalBytes, offer) {
+    this.server = server;
+    this.tid = tid;
+    this.controlSocket = controlSocket;
+    this.files = files;
+    this.totalBytes = totalBytes;
+    this.accepted = false;
+    this.destroyed = false;
+    this.finished = false;
+    this.rootMap = new Map();
+    this.destBase = null;
+    this.lastEmit = 0;
+    this.sockets = new Map(); // socket -> { reader, state }
+    this.sockets.set(controlSocket, { reader, state: { phase: 'header' } });
+
+    this.record = {
+      id: tid,
+      direction: 'recv',
+      peerName: String(offer.senderName || 'Unknown').slice(0, 64),
+      peerId: String(offer.senderId || ''),
+      fileCount: files.length,
+      totalBytes,
+      bytes: 0,
+      state: 'active',
+      label: labelFor(files),
+      startedAt: Date.now(),
+    };
+  }
+
+  attach(socket, reader) {
+    this.sockets.set(socket, { reader, state: { phase: 'header' } });
+  }
+
+  _resolveDest(rel) {
     const parts = rel.split('/');
     const top = parts[0];
-    if (!state.rootMap.has(top)) {
-      state.rootMap.set(top, uniqueName(state.destBase, top));
-    }
-    parts[0] = state.rootMap.get(top);
-    return path.join(state.destBase, ...parts);
+    if (!this.rootMap.has(top)) this.rootMap.set(top, uniqueName(this.destBase, top));
+    parts[0] = this.rootMap.get(top);
+    return path.join(this.destBase, ...parts);
   }
 
-  async _openNextFile(state) {
-    // advance past zero-byte files, creating them as we go
-    for (;;) {
-      state.fileIdx += 1;
-      if (state.fileIdx >= state.manifest.files.length) {
-        return false; // all files done
-      }
-      const f = state.manifest.files[state.fileIdx];
-      const dest = this._resolveDest(state, f.rel);
-      await ensureDir(path.dirname(dest));
-      if (f.size === 0) {
-        await fs.promises.writeFile(dest, Buffer.alloc(0));
-        continue;
-      }
-      state.ws = fs.createWriteStream(dest, { highWaterMark: READ_CHUNK });
-      state.currentPartial = dest;
-      state.fileRemaining = f.size;
-      return true;
+  /** Reserve destination names and create empty files/dirs up front. */
+  async prepare() {
+    this.destBase = this.server.opts.getDownloadDir();
+    await ensureDir(this.destBase);
+    for (const f of this.files) {
+      f.dest = this._resolveDest(f.rel);
+      await ensureDir(path.dirname(f.dest));
+      if (f.size === 0) await fs.promises.writeFile(f.dest, Buffer.alloc(0));
     }
   }
 
-  async _drain(socket, reader, state) {
+  async _fhFor(file) {
+    if (file.fh) return file.fh;
+    if (!file.opening) {
+      file.opening = fs.promises.open(file.dest, 'w').then((fh) => { file.fh = fh; return fh; });
+    }
+    return file.opening;
+  }
+
+  pump(socket) {
+    const entry = this.sockets.get(socket);
+    if (!entry || entry.pumping) { if (entry) entry.pending = true; return; }
+    entry.pumping = true;
+    this._drain(socket, entry)
+      .catch((err) => this.socketFailed(socket, err))
+      .finally(() => {
+        entry.pumping = false;
+        if (entry.pending) { entry.pending = false; this.pump(socket); }
+      });
+  }
+
+  async _drain(socket, entry) {
+    const { reader, state } = entry;
     for (;;) {
-      if (state.phase === 'offer') {
-        const offer = reader.next();
-        if (!offer) return;
-        if (offer.type !== 'offer' || !Array.isArray(offer.files)) {
-          throw new Error('bad offer');
+      if (this.destroyed) return;
+
+      if (state.phase === 'header') {
+        const f = reader.next();
+        if (!f) return;
+        if (f.type === 'end') { state.phase = 'ended'; continue; }
+        if (f.type !== 'chunk') throw new Error('bad frame: ' + f.type);
+        const file = this.files[f.idx];
+        if (!file) throw new Error('bad chunk index');
+        const len = Number(f.length);
+        const off = Number(f.offset);
+        if (!Number.isFinite(len) || !Number.isFinite(off) || len < 0
+            || off < 0 || off + len > file.size) {
+          throw new Error('bad chunk range');
         }
-        // validate manifest
-        const files = [];
-        let total = 0;
-        for (const f of offer.files) {
-          const rel = sanitizeRelPath(f.rel);
-          const size = Number(f.size);
-          if (rel === null || !Number.isFinite(size) || size < 0) {
-            throw new Error('bad manifest entry');
-          }
-          files.push({ rel, size });
-          total += size;
-        }
-        state.manifest = { files };
-        state.destBase = this.opts.getDownloadDir();
-        await ensureDir(state.destBase);
-        state.record = {
-          id: crypto.randomUUID(),
-          direction: 'recv',
-          peerName: String(offer.senderName || 'Unknown').slice(0, 64),
-          peerId: String(offer.senderId || ''),
-          fileCount: files.length,
-          totalBytes: total,
-          bytes: 0,
-          state: 'active',
-          label: files.length === 1
-            ? path.basename(files[0].rel)
-            : `${files.length} items`,
-          startedAt: Date.now(),
-        };
-        this.emit('transfer', { ...state.record });
-        socket.write(frame({ type: 'accept' }));
-        const hasData = await this._openNextFile(state);
+        state.file = file;
+        state.pos = off;
+        state.remaining = len;
         state.phase = 'payload';
-        if (!hasData) {
-          await this._finish(socket, state);
-          return;
-        }
         continue;
       }
 
       if (state.phase === 'payload') {
-        const raw = reader.takeRaw(state.fileRemaining);
+        const raw = reader.takeRaw(state.remaining);
         if (!raw) return;
-        state.fileRemaining -= raw.length;
-        state.record.bytes += raw.length;
-        const ok = state.ws.write(raw);
+        const fh = await this._fhFor(state.file);
+        if (this.destroyed) return;
+        socket.pause();
+        await fh.write(raw, 0, raw.length, state.pos);
+        socket.resume();
+        state.pos += raw.length;
+        state.remaining -= raw.length;
+        state.file.received += raw.length;
+        this.record.bytes += raw.length;
         const now = Date.now();
-        if (now - state.lastEmit > 150) {
-          state.lastEmit = now;
-          this.emit('transfer', { ...state.record });
+        if (now - this.lastEmit > 150) {
+          this.lastEmit = now;
+          this.server.emit('transfer', { ...this.record });
         }
-        if (state.fileRemaining === 0) {
-          await new Promise((res, rej) => state.ws.end((e) => (e ? rej(e) : res())));
-          state.ws = null;
-          state.currentPartial = null;
-          const more = await this._openNextFile(state);
-          if (!more) {
-            await this._finish(socket, state);
-            return;
-          }
-        } else if (!ok) {
-          socket.pause();
-          await new Promise((res) => state.ws.once('drain', res));
-          socket.resume();
-        }
+        if (state.remaining === 0) state.phase = 'header';
+        if (this.record.bytes >= this.totalBytes) { await this._finish(); return; }
         continue;
       }
 
-      return; // done phase: ignore anything else
+      return; // 'ended' — nothing more expected on this socket
     }
   }
 
-  async _finish(socket, state) {
-    state.phase = 'done';
-    state.record.state = 'done';
-    state.record.bytes = state.record.totalBytes;
-    this.emit('transfer', { ...state.record });
-    socket.write(frame({ type: 'done', received: state.record.bytes }));
-    socket.end();
+  async _finish() {
+    if (this.finished) return;
+    this.finished = true;
+    for (const f of this.files) {
+      if (f.fh) { try { await f.fh.close(); } catch (_) {} f.fh = null; }
+    }
+    this.record.state = 'done';
+    this.record.bytes = this.totalBytes;
+    this.server.emit('transfer', { ...this.record });
+    try { this.controlSocket.write(frame({ type: 'done', received: this.record.bytes })); } catch (_) {}
+    for (const s of this.sockets.keys()) { try { s.end(); } catch (_) {} }
+    this.server.sessions.delete(this.tid);
+  }
+
+  socketClosed(socket) {
+    this.sockets.delete(socket);
+    if (!this.finished && !this.destroyed && this.sockets.size === 0) {
+      this.destroy(new Error('sender disconnected'));
+    }
+  }
+
+  socketFailed(socket, err) {
+    if (this.finished) return;
+    this.destroy(err);
+  }
+
+  cancel() { this.destroy(new Error('canceled'), 'canceled'); }
+
+  destroy(err, stateName = 'error') {
+    if (this.destroyed || this.finished) return;
+    this.destroyed = true;
+    this.server.sessions.delete(this.tid);
+    for (const s of this.sockets.keys()) { try { s.destroy(); } catch (_) {} }
+    this.sockets.clear();
+    // close handles, then remove the partial files we created
+    (async () => {
+      for (const f of this.files) {
+        if (f.fh) { try { await f.fh.close(); } catch (_) {} f.fh = null; }
+      }
+      for (const f of this.files) {
+        if (f.dest) { try { await fs.promises.unlink(f.dest); } catch (_) {} }
+      }
+      for (const top of this.rootMap.values()) {
+        try { await fs.promises.rm(path.join(this.destBase, top), { recursive: true, force: true }); } catch (_) {}
+      }
+    })();
+    if (this.record.state === 'active') {
+      this.record.state = stateName;
+      this.record.error = stateName === 'canceled' ? 'Canceled' : err.message;
+      this.server.emit('transfer', { ...this.record });
+    }
   }
 }
 
@@ -442,12 +611,10 @@ class TransferServer extends EventEmitter {
 async function collectEntries(paths) {
   const entries = [];
   let totalBytes = 0;
-
   async function walk(abs, rel) {
     const st = await fs.promises.stat(abs);
     if (st.isDirectory()) {
-      const children = await fs.promises.readdir(abs);
-      for (const child of children) {
+      for (const child of await fs.promises.readdir(abs)) {
         await walk(path.join(abs, child), `${rel}/${child}`);
       }
     } else if (st.isFile()) {
@@ -455,7 +622,6 @@ async function collectEntries(paths) {
       totalBytes += st.size;
     }
   }
-
   for (const p of paths) {
     const abs = path.resolve(p);
     await walk(abs, path.basename(abs));
@@ -463,128 +629,182 @@ async function collectEntries(paths) {
   return { entries, totalBytes };
 }
 
+function connectSocket(host, port) {
+  return new Promise((resolve, reject) => {
+    const s = net.connect({ host, port });
+    s.setNoDelay(true);
+    s.setTimeout(SOCKET_TIMEOUT_MS);
+    s.once('connect', () => resolve(s));
+    s.once('error', reject);
+  });
+}
+
+/** Read one JSON frame from a socket that is not yet streaming payload. */
+function readFrame(socket, reader, types, timeoutMs = APPROVAL_TIMEOUT_MS) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => {
+      clearTimeout(to);
+      socket.removeListener('data', onData);
+      socket.removeListener('error', onErr);
+      socket.removeListener('close', onClose);
+    };
+    const to = setTimeout(() => { cleanup(); reject(new Error('timed out waiting for response')); }, timeoutMs);
+    const onErr = (e) => { cleanup(); reject(e); };
+    const onClose = () => { cleanup(); reject(new Error('connection closed')); };
+    const tryParse = () => {
+      let f;
+      try { f = reader.next(); } catch (e) { cleanup(); reject(e); return; }
+      if (!f) return;
+      cleanup();
+      if (types.includes(f.type)) resolve(f);
+      else reject(new Error('unexpected frame: ' + f.type));
+    };
+    const onData = (chunk) => { reader.push(chunk); tryParse(); };
+    socket.on('data', onData);
+    socket.on('error', onErr);
+    socket.on('close', onClose);
+    tryParse(); // data may already be buffered
+  });
+}
+
+/** Stream a byte range of a file into a socket, honouring backpressure. */
+function streamRange(socket, abs, offset, length) {
+  return new Promise((resolve, reject) => {
+    const rs = fs.createReadStream(abs, {
+      start: offset,
+      end: offset + length - 1,
+      highWaterMark: READ_CHUNK,
+    });
+    let sent = 0;
+    const onSockErr = (e) => { rs.destroy(); reject(e); };
+    socket.once('error', onSockErr);
+    rs.on('error', (e) => { socket.removeListener('error', onSockErr); reject(e); });
+    rs.on('data', (chunk) => {
+      sent += chunk.length;
+      if (!socket.write(chunk)) {
+        rs.pause();
+        socket.once('drain', () => rs.resume());
+      }
+    });
+    rs.on('end', () => {
+      socket.removeListener('error', onSockErr);
+      if (sent !== length) reject(new Error('short read on ' + abs));
+      else resolve();
+    });
+  });
+}
+
 /**
- * Send files/folders to a peer.
+ * Send files/folders to a peer over parallel streams.
  * opts: { host, port, self:{id,name}, paths, onUpdate(record),
- *         registry?:Map, transferId?, peerName?, peerId? }
- * Resolves with the final record; rejects on failure.
+ *         registry?:Map, peerName?, peerId?, streams? }
  */
 async function sendPaths(opts) {
   const { host, port, self, paths, onUpdate } = opts;
   const { entries, totalBytes } = await collectEntries(paths);
   if (entries.length === 0) throw new Error('Nothing to send (empty selection)');
 
+  const tid = crypto.randomUUID();
   const record = {
-    id: opts.transferId || crypto.randomUUID(),
+    id: tid,
     direction: 'send',
     peerName: opts.peerName || host,
     peerId: opts.peerId || '',
     fileCount: entries.length,
     totalBytes,
     bytes: 0,
-    state: 'active',
-    label: entries.length === 1 && paths.length === 1
-      ? path.basename(entries[0].rel)
-      : `${entries.length} items`,
+    state: 'pending',
+    label: labelFor(entries),
     startedAt: Date.now(),
   };
   const update = () => { if (onUpdate) onUpdate({ ...record }); };
   update();
 
-  const socket = net.connect({ host, port, noDelay: false });
-  socket.setTimeout(SOCKET_TIMEOUT_MS);
-
+  const sockets = [];
   let canceled = false;
+  const closeAll = () => { for (const s of sockets) { try { s.destroy(); } catch (_) {} } };
+
   if (opts.registry) {
-    opts.registry.set(record.id, {
-      cancel() {
-        canceled = true;
-        socket.destroy(new Error('canceled'));
-      },
-    });
+    opts.registry.set(tid, { cancel() { canceled = true; closeAll(); } });
   }
 
-  const reader = new FrameReader();
-  let onFrame = null;
-  socket.on('data', (chunk) => {
-    reader.push(chunk);
-    try {
-      let f;
-      while ((f = reader.next())) {
-        if (onFrame) onFrame(f);
-      }
-    } catch (err) {
-      socket.destroy(err);
-    }
-  });
-
-  const waitFrame = (type) => new Promise((resolve, reject) => {
-    const to = setTimeout(() => reject(new Error(`timeout waiting for ${type}`)), SOCKET_TIMEOUT_MS);
-    onFrame = (f) => {
-      if (f.type === type) { clearTimeout(to); onFrame = null; resolve(f); }
-      else if (f.type === 'reject') { clearTimeout(to); reject(new Error('receiver rejected the transfer')); }
-    };
-    socket.once('error', (e) => { clearTimeout(to); reject(e); });
-    socket.once('timeout', () => { clearTimeout(to); reject(new Error('connection timed out')); });
-  });
-
   try {
-    await new Promise((resolve, reject) => {
-      socket.once('connect', resolve);
-      socket.once('error', reject);
-    });
+    const control = await connectSocket(host, port);
+    sockets.push(control);
+    const reader = new FrameReader();
 
-    socket.write(frame({
+    control.write(frame({
       type: 'offer',
+      tid,
       senderId: self.id,
       senderName: self.name,
       files: entries.map((e) => ({ rel: e.rel, size: e.size })),
       totalBytes,
     }));
-    await waitFrame('accept');
 
-    let lastEmit = 0;
-    for (const entry of entries) {
-      if (entry.size === 0) continue;
-      await new Promise((resolve, reject) => {
-        const rs = fs.createReadStream(entry.abs, { highWaterMark: READ_CHUNK });
-        const onErr = (e) => { rs.destroy(); reject(e); };
-        socket.once('error', onErr);
-        rs.on('error', onErr);
-        rs.on('data', (chunk) => {
-          record.bytes += chunk.length;
-          const now = Date.now();
-          if (now - lastEmit > 150) { lastEmit = now; update(); }
-          if (!socket.write(chunk)) {
-            rs.pause();
-            socket.once('drain', () => rs.resume());
-          }
-        });
-        rs.on('end', () => { socket.removeListener('error', onErr); resolve(); });
-      });
+    const resp = await readFrame(control, reader, ['accept', 'reject']);
+    if (resp.type === 'reject') throw new Error('Declined by the other device');
+
+    record.state = 'active';
+    record.startedAt = Date.now();
+    update();
+
+    // build the shared chunk work queue
+    const queue = [];
+    entries.forEach((e, idx) => {
+      if (e.size === 0) return;
+      for (let off = 0; off < e.size; off += CHUNK_SIZE) {
+        queue.push({ idx, offset: off, length: Math.min(CHUNK_SIZE, e.size - off) });
+      }
+    });
+
+    const wanted = Math.max(1, Math.min(opts.streams || STREAMS, queue.length));
+    for (let i = 1; i < wanted; i++) {
+      const s = await connectSocket(host, port);
+      s.write(frame({ type: 'join', tid }));
+      sockets.push(s);
     }
 
-    await waitFrame('done');
+    let lastEmit = 0;
+    const worker = async (socket) => {
+      for (;;) {
+        if (canceled) return;
+        const task = queue.shift();
+        if (!task) break;
+        socket.write(frame({ type: 'chunk', idx: task.idx, offset: task.offset, length: task.length }));
+        await streamRange(socket, entries[task.idx].abs, task.offset, task.length);
+        record.bytes += task.length;
+        const now = Date.now();
+        if (now - lastEmit > 150) { lastEmit = now; update(); }
+      }
+      socket.write(frame({ type: 'end' }));
+    };
+
+    await Promise.all(sockets.map(worker));
+    if (canceled) throw new Error('canceled');
+
+    await readFrame(control, reader, ['done'], SOCKET_TIMEOUT_MS);
     record.state = 'done';
     record.bytes = totalBytes;
     update();
-    socket.end();
+    closeAll();
     return record;
   } catch (err) {
+    closeAll();
     record.state = canceled ? 'canceled' : 'error';
     record.error = canceled ? 'Canceled' : err.message;
     update();
-    try { socket.destroy(); } catch (_) {}
     if (canceled) return record;
     throw err;
   } finally {
-    if (opts.registry) opts.registry.delete(record.id);
+    if (opts.registry) opts.registry.delete(tid);
   }
 }
 
 module.exports = {
   DISCOVERY_PORT,
   DEFAULT_TRANSFER_PORT,
+  STREAMS,
   Discovery,
   TransferServer,
   sendPaths,

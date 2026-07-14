@@ -9,8 +9,12 @@ contextBridge.exposeInMainWorld('flux', {
   pickAndSend: (deviceId, mode) => ipcRenderer.invoke('pick-and-send', { deviceId, mode }),
   sendPaths: (deviceId, paths) => ipcRenderer.invoke('send-paths', { deviceId, paths }),
   cancelTransfer: (id) => ipcRenderer.invoke('cancel-transfer', id),
+  respondRequest: (id, accept, trust) => ipcRenderer.invoke('respond-request', { id, accept, trust }),
+  forgetTrusted: () => ipcRenderer.invoke('forget-trusted'),
   pathForFile: (file) => webUtils.getPathForFile(file),
   contactDeveloper: () => ipcRenderer.invoke('contact-developer'),
   onDevices: (fn) => ipcRenderer.on('devices', (e, devices) => fn(devices)),
   onTransfer: (fn) => ipcRenderer.on('transfer', (e, record) => fn(record)),
+  onRequest: (fn) => ipcRenderer.on('request', (e, info) => fn(info)),
+  onRequestResolved: (fn) => ipcRenderer.on('request-resolved', (e, id) => fn(id)),
 });
