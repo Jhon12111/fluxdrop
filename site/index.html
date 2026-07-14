@@ -1,0 +1,228 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FluxDrop — Transfer files at Wi‑Fi speed</title>
+  <meta name="description" content="FluxDrop is a free, universal file transfer app for Windows and macOS. Send files and folders between computers on the same Wi‑Fi at full network speed — no internet, no cables, no size limits." />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%234f8cff'/%3E%3Cstop offset='1' stop-color='%239d5cff'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect x='1' y='1' width='22' height='22' rx='6' fill='url(%23g)'/%3E%3Cpath d='M13.6 4.5 7 13h3.6l-1.2 6.5L16 11h-3.6l1.2-6.5z' fill='%23fff'/%3E%3C/svg%3E" />
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --bg-2: #10141d;
+      --card: #151a26;
+      --border: #232b3d;
+      --text: #e8ecf5;
+      --dim: #8a93a8;
+      --a1: #4f8cff;
+      --a2: #9d5cff;
+      --good: #38d39f;
+    }
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      font-family: "Segoe UI", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+    }
+    a { color: var(--a1); }
+    .wrap { max-width: 1060px; margin: 0 auto; padding: 0 24px; }
+
+    /* nav */
+    nav {
+      display: flex; align-items: center; gap: 12px;
+      padding: 18px 0;
+    }
+    .logo { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 18px; }
+    nav .spacer { flex: 1; }
+    nav a.gh {
+      color: var(--dim); text-decoration: none; font-size: 14px;
+      border: 1px solid var(--border); padding: 8px 14px; border-radius: 10px;
+    }
+    nav a.gh:hover { color: var(--text); border-color: #35405c; }
+
+    /* hero */
+    .hero { text-align: center; padding: 72px 0 56px; position: relative; }
+    .hero::before {
+      content: "";
+      position: absolute; inset: -40px 0 0;
+      background: radial-gradient(600px 300px at 50% 0%, rgba(79,140,255,0.16), transparent 70%);
+      pointer-events: none;
+    }
+    h1 {
+      font-size: clamp(34px, 6vw, 58px);
+      line-height: 1.15;
+      letter-spacing: -1px;
+      margin-bottom: 18px;
+    }
+    h1 .grad {
+      background: linear-gradient(90deg, var(--a1), var(--a2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .sub { color: var(--dim); font-size: 18px; max-width: 640px; margin: 0 auto 40px; }
+
+    .dl-row { display: flex; gap: 14px; justify-content: center; flex-wrap: wrap; }
+    .dl-btn {
+      display: flex; align-items: center; gap: 12px;
+      padding: 16px 26px;
+      border-radius: 14px;
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 15.5px;
+      transition: all 0.15s;
+      border: 1px solid var(--border);
+      color: var(--text);
+      background: var(--card);
+    }
+    .dl-btn.primary {
+      background: linear-gradient(135deg, var(--a1), var(--a2));
+      border-color: transparent;
+      color: #fff;
+      box-shadow: 0 8px 30px rgba(79, 140, 255, 0.3);
+    }
+    .dl-btn:hover { transform: translateY(-2px); }
+    .dl-btn small { display: block; font-weight: 400; font-size: 12px; opacity: 0.75; }
+    .dl-note { margin-top: 18px; font-size: 12.5px; color: var(--dim); }
+    .dl-note a { color: var(--dim); }
+
+    /* features */
+    .features {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+      padding: 56px 0;
+    }
+    .feat {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+    }
+    .feat .ico {
+      width: 42px; height: 42px; border-radius: 11px;
+      display: grid; place-items: center;
+      background: rgba(79, 140, 255, 0.12);
+      font-size: 20px;
+      margin-bottom: 14px;
+    }
+    .feat h3 { font-size: 15.5px; margin-bottom: 6px; }
+    .feat p { font-size: 13.5px; color: var(--dim); }
+
+    /* how */
+    .how { padding: 24px 0 64px; }
+    .how h2 { text-align: center; font-size: 26px; margin-bottom: 34px; }
+    .steps { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 16px; }
+    .step { text-align: center; padding: 10px; }
+    .step .num {
+      width: 34px; height: 34px; border-radius: 50%;
+      display: grid; place-items: center;
+      margin: 0 auto 12px;
+      font-weight: 700;
+      background: linear-gradient(135deg, var(--a1), var(--a2));
+      color: #fff;
+    }
+    .step p { font-size: 13.5px; color: var(--dim); }
+    .step b { color: var(--text); }
+
+    /* mac note */
+    .note {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      padding: 18px 22px;
+      font-size: 13px;
+      color: var(--dim);
+      margin-bottom: 64px;
+    }
+    .note b { color: var(--text); }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 26px 0 34px;
+      text-align: center;
+      font-size: 13px;
+      color: var(--dim);
+    }
+    footer .dev { margin-bottom: 6px; }
+    footer .dev b { color: var(--text); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <nav>
+      <div class="logo">
+        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+          <defs><linearGradient id="lg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#4f8cff"/><stop offset="1" stop-color="#9d5cff"/>
+          </linearGradient></defs>
+          <rect x="1" y="1" width="22" height="22" rx="6" fill="url(#lg)"/>
+          <path d="M13.6 4.5 7 13h3.6l-1.2 6.5L16 11h-3.6l1.2-6.5z" fill="#fff"/>
+        </svg>
+        FluxDrop
+      </div>
+      <div class="spacer"></div>
+      <a class="gh" href="https://github.com/Jhon12111/fluxdrop" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+
+    <section class="hero">
+      <h1>Transfer files between computers<br/>at <span class="grad">Wi‑Fi speed</span></h1>
+      <p class="sub">
+        FluxDrop is a free, universal file transfer app for <b>Windows</b> and <b>macOS</b>.
+        Send files and folders to any computer on the same network at full link speed —
+        no internet, no cables, no size limits.
+      </p>
+      <div class="dl-row">
+        <a class="dl-btn primary" id="btnWin" href="https://github.com/Jhon12111/fluxdrop/releases/latest/download/FluxDrop-Setup.exe">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M3 5.5 10.5 4.4v7.1H3V5.5zm0 13 7.5 1.1v-7H3v5.9zM11.5 4.2 21 3v8.5h-9.5V4.2zm0 15.6L21 21v-8.5h-9.5v7.3z"/></svg>
+          <span>Download for Windows<small>Windows 10 / 11 · 64-bit</small></span>
+        </a>
+        <a class="dl-btn" id="btnMac" href="https://github.com/Jhon12111/fluxdrop/releases/latest/download/FluxDrop.dmg">
+          <svg viewBox="0 0 24 24" width="22" height="22"><path fill="currentColor" d="M17.05 12.54c-.03-2.42 1.98-3.58 2.07-3.64-1.13-1.65-2.88-1.88-3.5-1.9-1.48-.15-2.9.88-3.65.88-.76 0-1.92-.86-3.16-.84-1.62.02-3.12.95-3.96 2.4-1.7 2.94-.43 7.28 1.21 9.66.81 1.17 1.77 2.47 3.03 2.42 1.22-.05 1.68-.78 3.15-.78s1.89.78 3.17.76c1.31-.03 2.14-1.18 2.94-2.36.93-1.35 1.31-2.66 1.33-2.73-.03-.01-2.55-.98-2.63-3.87zm-2.4-7.1c.67-.82 1.13-1.95 1-3.08-.97.04-2.15.65-2.85 1.46-.62.72-1.17 1.88-1.02 2.98 1.08.09 2.19-.55 2.87-1.36z"/></svg>
+          <span>Download for macOS<small>macOS 11+ · Universal (Intel &amp; Apple Silicon)</small></span>
+        </a>
+      </div>
+      <p class="dl-note">Free &amp; open source · <a href="https://github.com/Jhon12111/fluxdrop/releases/latest" target="_blank" rel="noopener">all releases</a></p>
+    </section>
+
+    <section class="features">
+      <div class="feat"><div class="ico">📡</div><h3>Automatic discovery</h3><p>Every computer running FluxDrop on your network appears instantly. No IP addresses, no pairing, no setup.</p></div>
+      <div class="feat"><div class="ico">⚡</div><h3>Full network speed</h3><p>Raw TCP streaming saturates gigabit Wi‑Fi and wired links. Move huge video projects in minutes, not hours.</p></div>
+      <div class="feat"><div class="ico">📂</div><h3>Files &amp; whole folders</h3><p>Drag &amp; drop anything. Folder structure is preserved exactly — perfect replacement for shuttling SSDs around.</p></div>
+      <div class="feat"><div class="ico">🔁</div><h3>Windows ⇄ Mac</h3><p>Works between any combination: Windows to Windows, Mac to Mac, and Windows to Mac in both directions.</p></div>
+      <div class="feat"><div class="ico">🛡️</div><h3>Private by design</h3><p>Files travel directly between your computers over your own network. Nothing ever touches the internet.</p></div>
+      <div class="feat"><div class="ico">🌙</div><h3>Always ready</h3><p>Runs quietly in the tray / menu bar. Incoming files are saved automatically to your chosen folder.</p></div>
+    </section>
+
+    <section class="how">
+      <h2>How it works</h2>
+      <div class="steps">
+        <div class="step"><div class="num">1</div><p><b>Install FluxDrop</b> on both computers connected to the same Wi‑Fi or LAN.</p></div>
+        <div class="step"><div class="num">2</div><p><b>Open the app</b> — the other device appears automatically within seconds.</p></div>
+        <div class="step"><div class="num">3</div><p><b>Drop your files</b> onto the device card and they arrive instantly in Downloads/FluxDrop.</p></div>
+      </div>
+    </section>
+
+    <div class="note">
+      <b>Windows:</b> on first launch click <b>Allow</b> on the firewall prompt (Private networks).
+      SmartScreen may warn about an unknown publisher — choose “More info → Run anyway”.<br/>
+      <b>macOS:</b> the app is not notarized yet — on first open, right-click the app and choose <b>Open</b>.
+    </div>
+
+    <footer>
+      <div class="dev">Developed by <b>Ashik Mahmud</b></div>
+      <div><a href="mailto:ashikmahmud284@gmail.com">Contact developer</a> · <a href="https://github.com/Jhon12111/fluxdrop" target="_blank" rel="noopener">Source code</a></div>
+    </footer>
+  </div>
+
+  <script>
+    // highlight the visitor's own platform
+    if (/Mac|iPhone|iPad/.test(navigator.platform || navigator.userAgent)) {
+      document.getElementById('btnMac').classList.add('primary');
+      document.getElementById('btnWin').classList.remove('primary');
+    }
+  </script>
+</body>
+</html>

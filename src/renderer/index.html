@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:;" />
+  <title>FluxDrop</title>
+  <link rel="stylesheet" href="app.css" />
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="brand">
+        <svg class="brand-mark" viewBox="0 0 24 24" width="26" height="26" aria-hidden="true">
+          <defs>
+            <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+              <stop offset="0" stop-color="#4f8cff"/><stop offset="1" stop-color="#9d5cff"/>
+            </linearGradient>
+          </defs>
+          <rect x="1" y="1" width="22" height="22" rx="6" fill="url(#bg)"/>
+          <path d="M13.6 4.5 7 13h3.6l-1.2 6.5L16 11h-3.6l1.2-6.5z" fill="#fff"/>
+        </svg>
+        <div>
+          <div class="brand-name">FluxDrop</div>
+          <div class="brand-sub">LAN file transfer</div>
+        </div>
+      </div>
+      <div class="self-info">
+        <div class="self-name" id="selfName">—</div>
+        <div class="self-ip" id="selfIp">—</div>
+      </div>
+      <button class="icon-btn" id="btnSettings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="currentColor" d="M12 8.4a3.6 3.6 0 1 0 0 7.2 3.6 3.6 0 0 0 0-7.2zm9.2 3.6c0 .5 0 .9-.1 1.4l2 1.6-2 3.4-2.4-1a7.6 7.6 0 0 1-2.4 1.4l-.4 2.6h-4l-.4-2.6a7.6 7.6 0 0 1-2.4-1.4l-2.4 1-2-3.4 2-1.6a8.6 8.6 0 0 1 0-2.8l-2-1.6 2-3.4 2.4 1c.7-.6 1.5-1 2.4-1.4l.4-2.6h4l.4 2.6c.9.3 1.7.8 2.4 1.4l2.4-1 2 3.4-2 1.6c.1.5.1.9.1 1.4z" opacity=".9"/></svg>
+      </button>
+    </header>
+
+    <main class="content">
+      <section class="devices-section">
+        <div class="section-head">
+          <h2>Devices on your network</h2>
+          <span class="pulse" title="Scanning"></span>
+        </div>
+        <div class="device-grid" id="deviceGrid"></div>
+        <div class="empty-state" id="emptyState">
+          <div class="empty-ring"><div class="empty-dot"></div></div>
+          <h3>Looking for devices…</h3>
+          <p>Install FluxDrop on your other Mac or Windows computers connected to the <b>same Wi‑Fi / network</b>. They will appear here automatically.</p>
+        </div>
+      </section>
+
+      <section class="transfers-section" id="transfersSection" hidden>
+        <div class="section-head"><h2>Transfers</h2>
+          <button class="link-btn" id="btnOpenDownloads">Open received files</button>
+        </div>
+        <div class="transfer-list" id="transferList"></div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      Developed by <b>Ashik Mahmud</b>
+      <span class="dot">·</span>
+      <a href="#" id="contactDev">Contact developer</a>
+    </footer>
+
+    <dialog id="settingsModal" class="modal">
+      <h2>Settings</h2>
+      <label class="field">
+        <span>Device name (visible to others)</span>
+        <input type="text" id="inpName" maxlength="48" spellcheck="false" />
+      </label>
+      <label class="field">
+        <span>Save received files to</span>
+        <div class="row">
+          <input type="text" id="inpDir" readonly />
+          <button class="btn secondary" id="btnChooseDir">Change…</button>
+        </div>
+      </label>
+      <label class="check">
+        <input type="checkbox" id="inpAutoLaunch" />
+        <span>Start automatically with the computer (runs in the tray)</span>
+      </label>
+      <div class="modal-actions">
+        <button class="btn secondary" id="btnCloseSettings">Close</button>
+        <button class="btn primary" id="btnSaveSettings">Save</button>
+      </div>
+      <div class="modal-credit">
+        FluxDrop · Developed by Ashik Mahmud ·
+        <a href="#" id="contactDevModal">ashikmahmud284@gmail.com</a>
+      </div>
+    </dialog>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
