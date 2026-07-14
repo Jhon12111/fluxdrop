@@ -1,5 +1,7 @@
 # FluxDrop
 
+**Download: [fluxdrop-hazel.vercel.app](https://fluxdrop-hazel.vercel.app)**
+
 Universal high-speed LAN file transfer for **Windows** and **macOS**.
 Transfer files and folders between any computers on the same Wi‑Fi / network at
 full link speed — no internet, no cables, no size limits.
