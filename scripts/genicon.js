@@ -132,10 +132,11 @@ function makeIco(pngBuf, size) {
 const outDir = path.join(__dirname, '..', 'build');
 fs.mkdirSync(outDir, { recursive: true });
 
+const png512 = drawIcon(512);
 const png256 = drawIcon(256);
 const png32 = drawIcon(32);
 
-fs.writeFileSync(path.join(outDir, 'icon.png'), png256);
+fs.writeFileSync(path.join(outDir, 'icon.png'), png512); // macOS needs >= 512x512
 fs.writeFileSync(path.join(outDir, 'icon.ico'), makeIco(png256, 256));
 fs.writeFileSync(path.join(outDir, 'tray.png'), png32);
 console.log('icons written to', outDir);
