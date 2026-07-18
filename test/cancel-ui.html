@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<!-- Isolated harness: proves the delegated cancel listener still fires after the
+     transfer list is rebuilt mid-progress (the bug the user hit). -->
+<html><head><meta charset="utf-8"><link rel="stylesheet" href="../src/renderer/app.css"></head>
+<body>
+<div id="app"><main class="content">
+  <section class="requests-section" id="requestsSection" hidden><div id="requestList"></div></section>
+  <section class="devices-section"><div class="section-head"><h2>Devices</h2>
+    <button class="link-btn" id="btnManual">+ Connect by IP</button></div>
+    <div class="device-grid" id="deviceGrid"></div>
+    <div class="empty-state" id="emptyState"></div></section>
+  <section class="transfers-section" id="transfersSection" hidden><div class="section-head"><h2>Transfers</h2>
+    <button class="link-btn" id="btnOpenDownloads">open</button>
+    <button class="link-btn" id="btnClearHistory">Clear history</button></div>
+    <div class="transfer-list" id="transferList"></div></section>
+</main>
+<dialog id="manualModal"><input id="inpIp"><div id="manualError"></div>
+  <button id="btnCloseManual"></button><button id="btnManualFolder"></button><button id="btnManualFiles"></button></dialog>
+<dialog id="settingsModal"><input id="inpName"><input id="inpDir"><input type="checkbox" id="inpAutoLaunch">
+  <div id="trustedRow"><span id="trustedText"></span><button id="btnForgetTrusted"></button></div>
+  <button id="btnCloseSettings"></button><button id="btnSaveSettings"></button><button id="btnChooseDir"></button></dialog>
+<button id="btnSettings"></button><a id="contactDev"></a><a id="contactDevModal"></a>
+<span id="selfName"></span><span id="selfIp"></span>
+</div>
+<script>
+  window.__canceled = [];
+  const noop = () => {};
+  const asyncNoop = async () => ({});
+  window.flux = {
+    getState: async () => ({
+      settings: { deviceName: 'Test', downloadDir: 'C:/dl', autoLaunch: false, trustedCount: 0 },
+      self: { id: 's', name: 'Test', ip: '192.168.0.5', platform: 'windows', version: '1.2.0' },
+      devices: [], transfers: [], requests: [],
+    }),
+    setSettings: asyncNoop, chooseDownloadDir: asyncNoop, openDownloads: noop,
+    pickAndSend: asyncNoop, sendPaths: asyncNoop, clearHistory: asyncNoop, sendToIp: asyncNoop,
+    respondRequest: noop, forgetTrusted: asyncNoop, contactDeveloper: noop, pathForFile: () => '',
+    cancelTransfer: (id) => { window.__canceled.push(id); return Promise.resolve({ ok: true }); },
+    onDevices: noop, onTransfer: (fn) => { window.__emitTransfer = fn; },
+    onRequest: noop, onRequestResolved: noop,
+  };
+</script>
+<script src="../src/renderer/app.js"></script>
+<script>
+  // after app.js init, drive a fake active transfer and rapid re-renders
+  window.__runTest = async () => {
+    const rec = { id: 'tx-1', direction: 'recv', peerName: 'MacBook', peerId: 'm',
+      fileCount: 1, totalBytes: 1000000, bytes: 300000, state: 'active',
+      label: 'Movie.mov', startedAt: Date.now() };
+    window.__emitTransfer(rec);
+    // simulate the 150ms progress rebuilds the real app does
+    for (let i = 0; i < 5; i++) { rec.bytes += 100000; window.__emitTransfer({ ...rec }); }
+    const btn = document.querySelector('#transferList .t-cancel');
+    if (!btn) return { error: 'no cancel button rendered' };
+    btn.click(); // this is the click that used to get lost
+    // one more rebuild right after the click
+    window.__emitTransfer({ ...rec, bytes: 900000 });
+    return { canceled: window.__canceled, buttonExisted: true };
+  };
+</script>
+</body></html>

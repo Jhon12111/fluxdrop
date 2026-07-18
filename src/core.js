@@ -34,12 +34,25 @@ const APPROVAL_TIMEOUT_MS = 120000;
 
 /* ---------------------------------------------------------------- helpers */
 
+// Adapter names that are almost always virtual / non-LAN. We still broadcast on
+// them (harmless) but never advertise their address as our primary IP.
+const VIRTUAL_NAME_RE = /virtualbox|vmware|hyper-v|vethernet|loopback|wsl|docker|tailscale|zerotier|hamachi|npcap|tap-|vpn/i;
+
+function isVirtualAddress(info, name) {
+  if (VIRTUAL_NAME_RE.test(name)) return true;
+  if (info.address.startsWith('169.254.')) return true; // link-local (no DHCP)
+  if (info.address.startsWith('192.168.56.')) return true; // VirtualBox host-only default
+  return false;
+}
+
 function localIPv4Interfaces() {
   const out = [];
   const ifaces = os.networkInterfaces();
   for (const name of Object.keys(ifaces)) {
     for (const info of ifaces[name] || []) {
-      if (info.family === 'IPv4' && !info.internal) out.push(info);
+      if (info.family === 'IPv4' && !info.internal) {
+        out.push({ ...info, ifName: name, virtual: isVirtualAddress(info, name) });
+      }
     }
   }
   return out;
@@ -57,7 +70,12 @@ function broadcastAddresses() {
 
 function primaryLocalIP() {
   const ifaces = localIPv4Interfaces();
-  return ifaces.length ? ifaces[0].address : '127.0.0.1';
+  if (!ifaces.length) return '127.0.0.1';
+  const real = ifaces.filter((i) => !i.virtual);
+  const pick = real.length ? real : ifaces;
+  // prefer common home/office LAN ranges
+  const preferred = pick.find((i) => i.address.startsWith('192.168.') || i.address.startsWith('10.'));
+  return (preferred || pick[0]).address;
 }
 
 /** Encode a control frame: 4-byte BE length + JSON. */
@@ -503,7 +521,7 @@ class RecvSession {
   async _drain(socket, entry) {
     const { reader, state } = entry;
     for (;;) {
-      if (this.destroyed) return;
+      if (this.destroyed || this.finished) return;
 
       if (state.phase === 'header') {
         const f = reader.next();
@@ -560,14 +578,25 @@ class RecvSession {
     this.record.state = 'done';
     this.record.bytes = this.totalBytes;
     this.server.emit('transfer', { ...this.record });
+    // Tell the sender we're done, then let IT close the sockets gracefully.
+    // Force-closing here races the sender's still-in-flight `end` frames and
+    // shows up as `write ECONNRESET` on the sender (worse on slow Wi-Fi links).
     try { this.controlSocket.write(frame({ type: 'done', received: this.record.bytes })); } catch (_) {}
-    for (const s of this.sockets.keys()) { try { s.end(); } catch (_) {} }
     this.server.sessions.delete(this.tid);
+    // Safety net: if the sender never closes (crashed), reclaim the sockets.
+    this._closeTimer = setTimeout(() => {
+      for (const s of this.sockets.keys()) { try { s.end(); } catch (_) {} }
+    }, 8000);
+    this._closeTimer.unref && this._closeTimer.unref();
   }
 
   socketClosed(socket) {
     this.sockets.delete(socket);
-    if (!this.finished && !this.destroyed && this.sockets.size === 0) {
+    if (this.finished) {
+      if (this.sockets.size === 0 && this._closeTimer) clearTimeout(this._closeTimer);
+      return;
+    }
+    if (!this.destroyed && this.sockets.size === 0) {
       this.destroy(new Error('sender disconnected'));
     }
   }
@@ -634,8 +663,17 @@ function connectSocket(host, port) {
     const s = net.connect({ host, port });
     s.setNoDelay(true);
     s.setTimeout(SOCKET_TIMEOUT_MS);
-    s.once('connect', () => resolve(s));
-    s.once('error', reject);
+    const onConnErr = (err) => reject(err);
+    s.once('connect', () => {
+      s.removeListener('error', onConnErr);
+      // Permanent guard: once the transfer is essentially done, the receiver
+      // may close a data socket while we're flushing the last `end` frame.
+      // Swallow that here so it can't crash the process; active-phase errors
+      // are still surfaced by the transient handlers in streamRange/readFrame.
+      s.on('error', () => {});
+      resolve(s);
+    });
+    s.once('error', onConnErr);
   });
 }
 

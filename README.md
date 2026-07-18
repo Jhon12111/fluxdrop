@@ -16,8 +16,11 @@ full link speed — no internet, no cables, no size limits.
 - **Approve incoming files** — you get a desktop notification and an in-app
   prompt showing who is sending, what, and how big. Nothing is written until you
   accept. Tick **Always allow** to trust a device and skip the prompt next time.
-- **Cancel any time** — both sender and receiver can cancel; partial files are
-  removed automatically.
+- **Cancel any time** — both sender and receiver can cancel from the transfer
+  list; partial files are removed automatically.
+- **Connect by IP** — if a device doesn't appear automatically (firewall,
+  unusual network), reach it directly by typing its IP address.
+- **Clear history** — one click removes finished transfers from the list.
 - Received files go to your chosen folder (default: `Downloads/FluxDrop`).
   Folder structure is preserved; duplicate names get ` (1)` suffixes.
 - **Cross-platform** — Windows ⇄ Windows, Mac ⇄ Mac, Windows ⇄ Mac.

@@ -219,6 +219,22 @@ async function doSend(deviceId, paths) {
   });
 }
 
+/** Send to a raw IP (manual "Connect by IP" fallback when discovery fails). */
+async function doSendToIp(ip, paths) {
+  // if that IP happens to be a discovered device, use its real name/port
+  const known = [...discovery.devices.values()].find((d) => d.ip === ip);
+  await sendPaths({
+    host: ip,
+    port: known ? known.port : DEFAULT_TRANSFER_PORT,
+    self: { id: settings.deviceId, name: settings.deviceName },
+    paths,
+    peerName: known ? known.name : ip,
+    peerId: known ? known.id : '',
+    registry: sendRegistry,
+    onUpdate: pushTransfer,
+  });
+}
+
 /* --------------------------------------------------------------------- IPC */
 
 function setupIpc() {
@@ -299,6 +315,29 @@ function setupIpc() {
     const entry = sendRegistry.get(id);
     if (entry) { entry.cancel(); return { ok: true }; }
     return { ok: transferServer.cancel(id) }; // incoming transfer
+  });
+
+  ipcMain.handle('clear-history', () => {
+    for (const [id, r] of transfers) {
+      if (r.state !== 'active' && r.state !== 'pending') transfers.delete(id);
+    }
+    return { ok: true };
+  });
+
+  ipcMain.handle('send-to-ip', async (e, { ip, mode }) => {
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(String(ip || ''))) {
+      return { ok: false, error: 'Invalid IP address' };
+    }
+    const props = mode === 'folder'
+      ? ['openDirectory', 'multiSelections']
+      : ['openFile', 'multiSelections'];
+    const res = await dialog.showOpenDialog(win, {
+      title: mode === 'folder' ? 'Choose folder(s) to send' : 'Choose file(s) to send',
+      properties: props,
+    });
+    if (res.canceled || res.filePaths.length === 0) return { ok: false, canceled: true };
+    doSendToIp(ip, res.filePaths).catch((err) => console.error('manual send failed:', err.message));
+    return { ok: true };
   });
 
   ipcMain.handle('respond-request', (e, { id, accept, trust }) => {

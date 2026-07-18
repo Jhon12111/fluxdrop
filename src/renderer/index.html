@@ -43,18 +43,21 @@
         <div class="section-head">
           <h2>Devices on your network</h2>
           <span class="pulse" title="Scanning"></span>
+          <button class="link-btn" id="btnManual">+ Connect by IP</button>
         </div>
         <div class="device-grid" id="deviceGrid"></div>
         <div class="empty-state" id="emptyState">
           <div class="empty-ring"><div class="empty-dot"></div></div>
           <h3>Looking for devices…</h3>
           <p>Install FluxDrop on your other Mac or Windows computers connected to the <b>same Wi‑Fi / network</b>. They will appear here automatically.</p>
+          <p class="empty-hint">Not showing up? Make sure both computers allowed FluxDrop through the firewall, then use <b>Connect by IP</b> above to reach a device directly.</p>
         </div>
       </section>
 
       <section class="transfers-section" id="transfersSection" hidden>
         <div class="section-head"><h2>Transfers</h2>
           <button class="link-btn" id="btnOpenDownloads">Open received files</button>
+          <button class="link-btn" id="btnClearHistory">Clear history</button>
         </div>
         <div class="transfer-list" id="transferList"></div>
       </section>
@@ -65,6 +68,21 @@
       <span class="dot">·</span>
       <a href="#" id="contactDev">Contact developer</a>
     </footer>
+
+    <dialog id="manualModal" class="modal">
+      <h2>Connect by IP address</h2>
+      <p class="modal-note">Use this if a device isn't showing up automatically. Enter the other computer's IP address (shown at the top of its FluxDrop window), then choose what to send.</p>
+      <label class="field">
+        <span>IP address</span>
+        <input type="text" id="inpIp" placeholder="e.g. 192.168.0.42" spellcheck="false" />
+      </label>
+      <div id="manualError" class="modal-error" hidden></div>
+      <div class="modal-actions">
+        <button class="btn secondary" id="btnCloseManual">Cancel</button>
+        <button class="btn secondary" id="btnManualFolder">Send Folder…</button>
+        <button class="btn primary" id="btnManualFiles">Send Files…</button>
+      </div>
+    </dialog>
 
     <dialog id="settingsModal" class="modal">
       <h2>Settings</h2>

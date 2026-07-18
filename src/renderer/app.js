@@ -187,8 +187,8 @@ function renderTransfers() {
           : `<div class="t-state ${r.state}">${r.state === 'done' ? '✓ ' + (isRecv ? 'Received' : 'Sent') : ''}</div>`}
       </div>
     `;
-    const cancelBtn = item.querySelector('.t-cancel');
-    if (cancelBtn) cancelBtn.addEventListener('click', () => flux.cancelTransfer(r.id));
+    // Cancel is handled by one delegated listener on the list (see init), so a
+    // click still registers even if this node is rebuilt mid-progress.
     list.appendChild(item);
   }
 }
@@ -268,6 +268,50 @@ async function init() {
   $('btnCloseSettings').addEventListener('click', () => $('settingsModal').close());
   $('btnSaveSettings').addEventListener('click', saveSettings);
   $('btnOpenDownloads').addEventListener('click', () => flux.openDownloads());
+
+  // Delegated cancel — survives the periodic re-render of the transfer list.
+  $('transferList').addEventListener('click', (e) => {
+    const btn = e.target.closest('.t-cancel');
+    if (!btn) return;
+    btn.disabled = true;
+    btn.textContent = 'Canceling…';
+    flux.cancelTransfer(btn.dataset.id);
+  });
+
+  $('btnClearHistory').addEventListener('click', async () => {
+    await flux.clearHistory();
+    for (const [id, r] of state.transfers) {
+      if (r.state !== 'active' && r.state !== 'pending') state.transfers.delete(id);
+    }
+    renderTransfers();
+  });
+
+  // Connect by IP
+  const manual = $('manualModal');
+  $('btnManual').addEventListener('click', () => {
+    $('inpIp').value = '';
+    $('manualError').hidden = true;
+    manual.showModal();
+  });
+  $('btnCloseManual').addEventListener('click', () => manual.close());
+  const manualSend = async (mode) => {
+    const ip = $('inpIp').value.trim();
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
+      $('manualError').textContent = 'Please enter a valid IPv4 address like 192.168.0.42';
+      $('manualError').hidden = false;
+      return;
+    }
+    const res = await flux.sendToIp(ip, mode);
+    if (res && res.ok === false && res.error) {
+      $('manualError').textContent = res.error;
+      $('manualError').hidden = false;
+      return;
+    }
+    manual.close();
+  };
+  $('btnManualFiles').addEventListener('click', () => manualSend('files'));
+  $('btnManualFolder').addEventListener('click', () => manualSend('folder'));
+
   $('btnForgetTrusted').addEventListener('click', async () => {
     await flux.forgetTrusted();
     state.settings.trustedCount = 0;

@@ -9,6 +9,8 @@ contextBridge.exposeInMainWorld('flux', {
   pickAndSend: (deviceId, mode) => ipcRenderer.invoke('pick-and-send', { deviceId, mode }),
   sendPaths: (deviceId, paths) => ipcRenderer.invoke('send-paths', { deviceId, paths }),
   cancelTransfer: (id) => ipcRenderer.invoke('cancel-transfer', id),
+  clearHistory: () => ipcRenderer.invoke('clear-history'),
+  sendToIp: (ip, mode) => ipcRenderer.invoke('send-to-ip', { ip, mode }),
   respondRequest: (id, accept, trust) => ipcRenderer.invoke('respond-request', { id, accept, trust }),
   forgetTrusted: () => ipcRenderer.invoke('forget-trusted'),
   pathForFile: (file) => webUtils.getPathForFile(file),
