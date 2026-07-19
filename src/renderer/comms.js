@@ -235,18 +235,24 @@
   }
 
   function micError(err) {
-    if (err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
-      return 'Microphone blocked — allow mic access';
+    const name = err && err.name;
+    if (name === 'NotAllowedError' || name === 'SecurityError') {
+      return 'Microphone blocked — allow mic access in system settings';
     }
-    if (err && err.name === 'NotFoundError') return 'No microphone found';
-    return 'Could not start audio';
+    if (name === 'NotFoundError' || name === 'OverconstrainedError') return 'No microphone found';
+    if (name === 'NotReadableError' || name === 'TrackStartError') return 'Mic is in use by another app';
+    // surface the real reason so unusual failures are diagnosable
+    return 'Could not start audio' + (name ? ' (' + name + ')' : (err && err.message ? ' (' + err.message + ')' : ''));
   }
 
   function onCallInvite(peerId, callId, sdp) {
-    if (call) { // busy
+    // Only truly busy when a live call is up. A call in the brief 'ended' state
+    // (showing the "Call ended" card) must not reject a fresh invite.
+    if (call && call.phase !== 'ended') {
       flux.signalSend(peerId, { type: 'call-busy', callId });
       return;
     }
+    if (call) teardown(); // clear a lingering ended-call card
     call = { peerId, callId, role: 'callee', phase: 'incoming', pc: null,
              stream: null, pendingIce: [], offer: sdp, muted: false };
     setCallUI('incoming');
@@ -343,22 +349,29 @@
 
   function onCallHangup(callId) {
     if (!call || call.callId !== callId) return;
-    endCall('Call ended');
+    endCall('Call ended', false); // peer already hung up — don't echo back
   }
 
   function onCallRejected(callId, busy) {
     if (!call || call.callId !== callId) return;
-    endCall(busy ? 'Busy — try again later' : 'Call declined');
+    endCall(busy ? 'Busy — try again later' : 'Call declined', false);
   }
 
-  // End with a short status message, then close the overlay.
-  function endCall(reason) {
+  // End with a short status message, then close the overlay. By default we also
+  // tell the peer to hang up, so a failure or drop on our side (e.g. the callee's
+  // mic won't start) never leaves the other side stuck ringing or "in a call"
+  // (which then reports Busy on the next attempt). Pass notify=false when the
+  // peer is the one that ended it, to avoid echoing the message back.
+  function endCall(reason, notify = true) {
     if (!call) return;
+    if (notify) {
+      try { flux.signalSend(call.peerId, { type: 'call-hangup', callId: call.callId }); } catch (_) {}
+    }
     call.endReason = reason;
     call.phase = 'ended';
     setCallUI('ended');
     teardown(true);
-    setTimeout(() => { if (!call || call.phase === 'ended') setCallUI('idle'); call = null; }, 1600);
+    setTimeout(() => { if (call && call.phase === 'ended') setCallUI('idle'); call = null; }, 1600);
   }
 
   function teardown(keepRecord) {

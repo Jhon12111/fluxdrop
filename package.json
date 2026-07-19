@@ -1,7 +1,7 @@
 {
   "name": "fluxdrop",
   "productName": "FluxDrop",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Universal high-speed LAN file transfer for Windows and macOS",
   "main": "src/main.js",
   "author": "Ashik Mahmud <ashikmahmud284@gmail.com>",
@@ -65,7 +65,13 @@
       ],
       "icon": "build/icon.png",
       "category": "public.app-category.utilities",
-      "artifactName": "${productName}.${ext}"
+      "artifactName": "${productName}.${ext}",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "FluxDrop uses your microphone for voice calls with other devices on your network."
+      }
     }
   }
 }
