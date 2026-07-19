@@ -1,5 +1,5 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell, nativeImage, Notification, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell, nativeImage, Notification, session, powerSaveBlocker, systemPreferences } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -10,6 +10,12 @@ const { Signaling } = require('./signal');
 
 const REPO = 'Jhon12111/fluxdrop';
 const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
+
+// Let call ringtones and message sounds play while the window is in the tray
+// (no user gesture in the page). Must be set before the app is ready.
+app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');
+
+let suspensionBlockerId = null;
 
 const SMOKE = process.argv.includes('--smoke');
 const START_HIDDEN = process.argv.includes('--hidden');
@@ -86,6 +92,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
+      backgroundThrottling: false, // keep timers/audio alive when hidden
+      autoplayPolicy: 'no-user-gesture-required',
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
@@ -483,6 +491,21 @@ function setupIpc() {
     return { ok: true };
   });
 
+  // Ensure microphone access before a call. On macOS this shows the single
+  // system TCC prompt (and returns the result) instead of getUserMedia failing
+  // silently; on Windows/Linux getUserMedia handles it, so we just say ok.
+  ipcMain.handle('ensure-mic', async () => {
+    if (process.platform !== 'darwin') return { ok: true };
+    try {
+      const status = systemPreferences.getMediaAccessStatus('microphone');
+      if (status === 'granted') return { ok: true };
+      const granted = await systemPreferences.askForMediaAccess('microphone');
+      return { ok: granted, denied: !granted };
+    } catch (_) {
+      return { ok: true }; // fall back to getUserMedia's own prompt
+    }
+  });
+
   ipcMain.handle('check-updates', () => checkForUpdates(true));
 
   ipcMain.handle('open-release', (e, url) => {
@@ -526,6 +549,12 @@ if (!gotLock) {
     });
     session.defaultSession.setPermissionCheckHandler((wc, permission) =>
       permission === 'media' || permission === 'mediaKeySystem');
+
+    // Keep discovering and receiving files/chat/calls while minimized to the
+    // tray. Without this the OS can suspend the app (App Nap on macOS, power
+    // throttling on Windows), which stops the discovery heartbeat — the device
+    // vanishes from other machines and incoming messages/notifications stall.
+    try { suspensionBlockerId = powerSaveBlocker.start('prevent-app-suspension'); } catch (_) {}
 
     await startNetwork();
     setupIpc();

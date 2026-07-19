@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld('flux', {
   // chat + call signaling
   signalSend: (peerId, msg) => ipcRenderer.invoke('signal-send', { peerId, msg }),
   onSignal: (fn) => ipcRenderer.on('signal', (e, data) => fn(data)),
+  ensureMic: () => ipcRenderer.invoke('ensure-mic'),
   // updates
   checkUpdates: () => ipcRenderer.invoke('check-updates'),
   openRelease: (url) => ipcRenderer.invoke('open-release', url),

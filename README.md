@@ -28,11 +28,14 @@ full link speed — no internet, no cables, no size limits.
   app keeps receiving. Optional start-at-login.
 - **Drag & drop** — drop files onto a device card, or use Send Files /
   Send Folder buttons.
-- **Text chat** — message any device on the network right from its card; a
-  desktop notification and unread badge appear when the window isn't focused.
-- **Voice calls** — call another device over Wi‑Fi. The receiver gets a ringing
-  prompt and can Accept or Decline; audio flows peer-to-peer over WebRTC (no
-  server). Either side can hang up any time (button or `Esc`).
+- **Text chat** — message any device on the network right from its card, with a
+  sound, desktop notification, unread badge, and **Sent / Seen** read receipts.
+- **Voice calls** — call another device over Wi‑Fi with a ringtone. The receiver
+  gets a ringing prompt and can Accept or Decline; audio flows peer-to-peer over
+  WebRTC (no server). Either side can hang up any time (button or `Esc`).
+- **Stays in the tray** — closing the window keeps FluxDrop discoverable and
+  able to receive files, chats, and calls in the background (it prevents the OS
+  from suspending it), so notifications still arrive.
 - **Update alerts** — FluxDrop checks GitHub for new releases and shows a banner
   and notification when one is available. Nothing installs automatically; you
   choose when to download. Also under Settings → *Check for updates*.

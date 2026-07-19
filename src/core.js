@@ -37,6 +37,12 @@ const DEVICE_TTL_MS = 7000;
 const READ_CHUNK = 512 * 1024;          // socket/disk read granularity
 const CHUNK_SIZE = 8 * 1024 * 1024;     // work-queue chunk size
 const STREAMS = 4;                      // parallel TCP connections
+// Receive-side backpressure: pause a socket only once its already-received but
+// not-yet-written backlog gets large, and resume when it drains. This keeps the
+// network flowing during disk writes (far faster than pausing on every chunk)
+// while still bounding memory.
+const RECV_HIGH_WATER = 24 * 1024 * 1024;
+const RECV_LOW_WATER = 6 * 1024 * 1024;
 const SOCKET_TIMEOUT_MS = 60000;
 const APPROVAL_TIMEOUT_MS = 120000;
 
@@ -569,6 +575,12 @@ class RecvSession {
     for (;;) {
       if (this.destroyed || this.finished) return;
 
+      // We've caught up on the backlog — let the socket read again.
+      if (entry.paused && reader.length < RECV_LOW_WATER) {
+        entry.paused = false;
+        socket.resume();
+      }
+
       if (state.phase === 'header') {
         const f = reader.next();
         if (!f) return;
@@ -594,9 +606,13 @@ class RecvSession {
         if (!raw) return;
         const fh = await this._fhFor(state.file);
         if (this.destroyed) return;
-        socket.pause();
+        // Only throttle the socket when the unwritten backlog is large, instead
+        // of stalling the network on every single write.
+        if (!entry.paused && reader.length > RECV_HIGH_WATER) {
+          entry.paused = true;
+          socket.pause();
+        }
         await fh.write(raw, 0, raw.length, state.pos);
-        socket.resume();
         state.pos += raw.length;
         state.remaining -= raw.length;
         state.file.received += raw.length;

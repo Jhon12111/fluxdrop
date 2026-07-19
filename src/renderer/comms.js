@@ -68,6 +68,7 @@
       ringCtx = new (window.AudioContext || window.webkitAudioContext)();
       const beep = () => {
         if (!ringCtx) return;
+        if (ringCtx.state === 'suspended') { try { ringCtx.resume(); } catch (_) {} }
         const o = ringCtx.createOscillator();
         const g = ringCtx.createGain();
         o.frequency.value = outgoing ? 440 : 520;
@@ -89,13 +90,56 @@
     if (ringCtx) { try { ringCtx.close(); } catch (_) {} ringCtx = null; }
   }
 
+  // Short UI sounds (message received, etc.). Autoplay is allowed via the app's
+  // autoplay-policy switch, so this plays even while minimized to the tray.
+  let sfxCtx = null;
+  function sfx(notes) {
+    try {
+      if (!sfxCtx) sfxCtx = new (window.AudioContext || window.webkitAudioContext)();
+      if (sfxCtx.state === 'suspended') sfxCtx.resume();
+      let t = sfxCtx.currentTime;
+      for (const f of notes) {
+        const o = sfxCtx.createOscillator();
+        const g = sfxCtx.createGain();
+        o.type = 'sine';
+        o.frequency.value = f;
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(0.22, t + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + 0.16);
+        o.connect(g); g.connect(sfxCtx.destination);
+        o.start(t); o.stop(t + 0.18);
+        t += 0.13;
+      }
+    } catch (_) { /* audio unavailable — ignore */ }
+  }
+  function messageSound() { sfx([784, 1047]); } // two-note "pop"
+
   /* ------------------------------------------------------------------ chat */
 
   function pushMsg(peerId, mine, text) {
     if (!threads.has(peerId)) threads.set(peerId, []);
     const arr = threads.get(peerId);
-    arr.push({ mine, text, ts: Date.now() });
+    arr.push({ mine, text, ts: Date.now(), seen: false });
     if (arr.length > 500) arr.splice(0, arr.length - 500);
+  }
+
+  // Window truly in the foreground with this chat open = the user is reading it.
+  function chatIsVisible(peerId) {
+    return activeChat === peerId && !$('chatDrawer').hidden && document.hasFocus();
+  }
+
+  // Tell the peer we've read their messages (drives their "Seen" receipt).
+  function markSeen(peerId) {
+    const arr = threads.get(peerId) || [];
+    if (arr.some((m) => !m.mine)) flux.signalSend(peerId, { type: 'chat-seen' });
+  }
+
+  function onChatSeen(peerId) {
+    const arr = threads.get(peerId);
+    if (!arr) return;
+    let changed = false;
+    for (const m of arr) { if (m.mine && !m.seen) { m.seen = true; changed = true; } }
+    if (changed && activeChat === peerId) renderChat();
   }
 
   function renderChat() {
@@ -108,13 +152,20 @@
       e.textContent = 'No messages yet. Say hello 👋';
       log.appendChild(e);
     }
-    let lastDay = '';
     for (const m of arr) {
       const bubble = document.createElement('div');
       bubble.className = 'bubble ' + (m.mine ? 'mine' : 'theirs');
       const time = new Date(m.ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       bubble.innerHTML = `<span class="b-text">${esc(m.text)}</span><span class="b-time">${time}</span>`;
       log.appendChild(bubble);
+    }
+    // Read receipt under the thread when your latest message is the last one.
+    if (arr.length && arr[arr.length - 1].mine) {
+      const r = document.createElement('div');
+      const seen = arr[arr.length - 1].seen;
+      r.className = 'chat-receipt' + (seen ? ' seen' : '');
+      r.textContent = seen ? '✓✓ Seen' : '✓ Sent';
+      log.appendChild(r);
     }
     log.scrollTop = log.scrollHeight;
   }
@@ -131,6 +182,7 @@
     document.body.classList.add('drawer-open');
     renderChat();
     $('chatText').focus();
+    markSeen(peerId); // opening the thread means I've read what's there
   }
 
   function closeChat() {
@@ -151,8 +203,10 @@
 
   function onChatArrived(peerId, text) {
     pushMsg(peerId, false, text);
-    if (activeChat === peerId && !$('chatDrawer').hidden) {
+    messageSound();
+    if (chatIsVisible(peerId)) {
       renderChat();
+      markSeen(peerId); // I'm looking right at it
     } else {
       unread.set(peerId, (unread.get(peerId) || 0) + 1);
       onUnread();
@@ -223,6 +277,9 @@
   }
 
   async function getMic() {
+    // On macOS this triggers the single system mic prompt up front (instead of
+    // getUserMedia failing until the user clicks Allow several times).
+    try { await flux.ensureMic(); } catch (_) {}
     return navigator.mediaDevices.getUserMedia({ audio: true, video: false });
   }
 
@@ -402,6 +459,7 @@
   function handleSignal({ peerId, msg }) {
     switch (msg.type) {
       case 'chat': onChatArrived(peerId, String(msg.text || '')); break;
+      case 'chat-seen': onChatSeen(peerId); break;
       case 'call-invite': onCallInvite(peerId, msg.callId, msg.sdp); break;
       case 'call-accept': onCallAccept(msg.callId, msg.sdp); break;
       case 'call-ice': onCallIce(msg.callId, msg.candidate); break;
