@@ -35,6 +35,17 @@
     return d ? d.name : 'Unknown device';
   }
 
+  // RTCSessionDescription / RTCIceCandidate are platform objects that throw
+  // DataCloneError when passed through Electron's IPC (structured clone). Always
+  // send plain objects over the signaling channel.
+  function plainSdp(d) { return { type: d.type, sdp: d.sdp }; }
+  function plainCandidate(c) {
+    return c && typeof c.toJSON === 'function' ? c.toJSON() : {
+      candidate: c.candidate, sdpMid: c.sdpMid,
+      sdpMLineIndex: c.sdpMLineIndex, usernameFragment: c.usernameFragment,
+    };
+  }
+
   function initials(name) {
     const parts = String(name || '?').trim().split(/\s+/).slice(0, 2);
     return parts.map((p) => p[0] ? p[0].toUpperCase() : '').join('') || '?';
@@ -193,7 +204,7 @@
     const pc = new RTCPeerConnection(RTC_CONFIG);
     pc.onicecandidate = (e) => {
       if (e.candidate) {
-        flux.signalSend(peerId, { type: 'call-ice', callId, candidate: e.candidate });
+        flux.signalSend(peerId, { type: 'call-ice', callId, candidate: plainCandidate(e.candidate) });
       }
     };
     pc.ontrack = (e) => {
@@ -228,7 +239,7 @@
       for (const t of call.stream.getTracks()) call.pc.addTrack(t, call.stream);
       const offer = await call.pc.createOffer({ offerToReceiveAudio: true });
       await call.pc.setLocalDescription(offer);
-      flux.signalSend(peerId, { type: 'call-invite', callId, sdp: call.pc.localDescription });
+      flux.signalSend(peerId, { type: 'call-invite', callId, sdp: plainSdp(call.pc.localDescription) });
     } catch (err) {
       endCall(micError(err));
     }
@@ -270,7 +281,7 @@
       await flushIce();
       const answer = await call.pc.createAnswer();
       await call.pc.setLocalDescription(answer);
-      flux.signalSend(call.peerId, { type: 'call-accept', callId: call.callId, sdp: call.pc.localDescription });
+      flux.signalSend(call.peerId, { type: 'call-accept', callId: call.callId, sdp: plainSdp(call.pc.localDescription) });
       goActive();
     } catch (err) {
       endCall(micError(err));

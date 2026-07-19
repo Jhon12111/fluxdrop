@@ -1,7 +1,7 @@
 {
   "name": "fluxdrop",
   "productName": "FluxDrop",
-  "version": "1.3.1",
+  "version": "1.3.2",
   "description": "Universal high-speed LAN file transfer for Windows and macOS",
   "main": "src/main.js",
   "author": "Ashik Mahmud <ashikmahmud284@gmail.com>",

@@ -544,6 +544,64 @@ if (!gotLock) {
       }, 4000);
     }
 
+    // diagnostic: --sdp-test checks whether an SDP / ICE candidate survives the
+    // structured-clone (IPC) + JSON boundary the real signaling path crosses.
+    if (process.argv.includes('--sdp-test')) {
+      win.webContents.once('did-finish-load', () => {
+        setTimeout(async () => {
+          try {
+            const r = await win.webContents.executeJavaScript(`(async () => {
+              const out = {};
+              const pc = new RTCPeerConnection({ iceServers: [] });
+              const dc = pc.createDataChannel('x');
+              const offer = await pc.createOffer();
+              await pc.setLocalDescription(offer);
+              const desc = pc.localDescription;
+              try { structuredClone(desc); out.cloneDesc = 'OK'; } catch (e) { out.cloneDesc = 'THROW ' + e.name; }
+              out.jsonDesc = JSON.stringify(desc).slice(0, 40);
+              const cand = await new Promise(res => { pc.onicecandidate = e => { if (e.candidate) res(e.candidate); }; });
+              try { structuredClone(cand); out.cloneCand = 'OK'; } catch (e) { out.cloneCand = 'THROW ' + e.name; }
+              out.jsonCand = JSON.stringify(cand).slice(0, 40);
+              pc.close();
+              return out;
+            })()`);
+            console.log('SDPTEST ' + JSON.stringify(r));
+          } catch (e) { console.log('SDPTEST EXEC_ERR ' + e.message); }
+          quitting = true; app.quit();
+        }, 2500);
+      });
+    }
+
+    // diagnostic: --mic-test tries getUserMedia in the renderer and prints the
+    // exact outcome (device list + any error name/message), then quits.
+    if (process.argv.includes('--mic-test')) {
+      win.webContents.once('did-finish-load', () => {
+        setTimeout(async () => {
+          try {
+            const r = await win.webContents.executeJavaScript(`(async () => {
+              const out = { secureContext: window.isSecureContext, hasMediaDevices: !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia) };
+              try {
+                const devs = await navigator.mediaDevices.enumerateDevices();
+                out.audioInputs = devs.filter(d => d.kind === 'audioinput').length;
+              } catch (e) { out.enumErr = e.name + ': ' + e.message; }
+              try {
+                const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+                out.getUserMedia = 'OK';
+                out.trackLabels = s.getAudioTracks().map(t => t.label);
+                s.getTracks().forEach(t => t.stop());
+              } catch (e) { out.getUserMedia = 'ERR ' + e.name + ': ' + e.message; }
+              return out;
+            })()`);
+            console.log('MICTEST ' + JSON.stringify(r));
+          } catch (e) {
+            console.log('MICTEST EXEC_ERR ' + e.message);
+          }
+          quitting = true;
+          app.quit();
+        }, 2500);
+      });
+    }
+
     // test hook: --click=<css selector> clicks an element once it appears
     const clickArg = process.argv.find((a) => a.startsWith('--click='));
     if (clickArg) {
