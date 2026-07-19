@@ -23,6 +23,14 @@ const { EventEmitter } = require('events');
 
 const DISCOVERY_PORT = 52130;
 const DEFAULT_TRANSFER_PORT = 52131;
+const DEFAULT_SIGNAL_PORT = 52132; // chat + call signaling (see signal.js)
+// Admin-scoped multicast group for discovery. Many Wi-Fi APs silently drop
+// UDP broadcast between wireless clients (broadcast rate-limiting / client
+// isolation), which is why a Mac and a PC on the same Wi-Fi often can't see
+// each other. Multicast is forwarded far more reliably — the same reason
+// mDNS/Bonjour use it — so we announce over multicast and keep broadcast as a
+// fallback for wired/permissive networks.
+const MULTICAST_ADDR = '239.255.42.130';
 const PROTOCOL_VERSION = 1;
 const HEARTBEAT_MS = 2000;
 const DEVICE_TTL_MS = 7000;
@@ -204,6 +212,7 @@ class Discovery extends EventEmitter {
     this.sock = null;
     this.heartbeat = null;
     this.pruner = null;
+    this.memberships = new Set(); // interface addrs we've joined the group on
   }
 
   start() {
@@ -214,6 +223,9 @@ class Discovery extends EventEmitter {
       sock.on('message', (msg, rinfo) => this._onMessage(msg, rinfo));
       sock.bind(DISCOVERY_PORT, () => {
         try { sock.setBroadcast(true); } catch (_) {}
+        try { sock.setMulticastTTL(1); } catch (_) {}      // stay on the local link
+        try { sock.setMulticastLoopback(true); } catch (_) {} // let same-host peers see us
+        this._refreshMembership();
         this.heartbeat = setInterval(() => this.announce(), HEARTBEAT_MS);
         this.pruner = setInterval(() => this._prune(), 1500);
         this.announce();
@@ -230,12 +242,44 @@ class Discovery extends EventEmitter {
       name: this.self.name,
       platform: this.self.platform,
       port: this.self.transferPort,
+      sport: this.self.signalPort,
     }));
+  }
+
+  /** Join the discovery multicast group on every LAN interface. */
+  _refreshMembership() {
+    if (!this.sock) return;
+    const addrs = localIPv4Interfaces().map((i) => i.address);
+    for (const addr of (addrs.length ? addrs : [undefined])) {
+      const key = addr || '*';
+      if (this.memberships.has(key)) continue;
+      try {
+        this.sock.addMembership(MULTICAST_ADDR, addr);
+        this.memberships.add(key);
+      } catch (_) { /* interface may not support multicast — ignore */ }
+    }
+  }
+
+  /**
+   * Multicast the payload out of each interface in turn. We serialize on the
+   * send callback so setMulticastInterface() can't race across queued sends,
+   * guaranteeing the packet leaves every real NIC (incl. the shared Wi-Fi)
+   * even when the default route is a VPN or virtual adapter.
+   */
+  _multicast(payload, addrs, i = 0) {
+    if (!this.sock || i >= addrs.length) return;
+    const addr = addrs[i];
+    try { if (addr) this.sock.setMulticastInterface(addr); } catch (_) {}
+    this.sock.send(payload, DISCOVERY_PORT, MULTICAST_ADDR,
+      () => this._multicast(payload, addrs, i + 1));
   }
 
   announce() {
     if (!this.sock) return;
+    this._refreshMembership(); // pick up interfaces that came up (Wi-Fi reconnect)
     const payload = this._payload('hi');
+    const addrs = localIPv4Interfaces().map((i) => i.address);
+    this._multicast(payload, addrs.length ? addrs : [null]);
     for (const addr of broadcastAddresses()) {
       this.sock.send(payload, DISCOVERY_PORT, addr, () => {});
     }
@@ -259,6 +303,7 @@ class Discovery extends EventEmitter {
       platform: String(data.platform || 'unknown'),
       ip: rinfo.address,
       port: Number(data.port) || DEFAULT_TRANSFER_PORT,
+      sport: Number(data.sport) || DEFAULT_SIGNAL_PORT,
       lastSeen: Date.now(),
     });
     if (!known) this.sock.send(this._payload('hi'), DISCOVERY_PORT, rinfo.address, () => {});
@@ -284,6 +329,7 @@ class Discovery extends EventEmitter {
     if (this.sock) {
       try {
         const bye = this._payload('bye');
+        this.sock.send(bye, DISCOVERY_PORT, MULTICAST_ADDR, () => {});
         for (const addr of broadcastAddresses()) {
           this.sock.send(bye, DISCOVERY_PORT, addr, () => {});
         }
@@ -714,20 +760,40 @@ function streamRange(socket, abs, offset, length) {
       highWaterMark: READ_CHUNK,
     });
     let sent = 0;
-    const onSockErr = (e) => { rs.destroy(); reject(e); };
-    socket.once('error', onSockErr);
-    rs.on('error', (e) => { socket.removeListener('error', onSockErr); reject(e); });
+    let done = false;
+
+    // Settle exactly once and detach every listener. Critically, we also listen
+    // for the socket's 'close' event: a plain socket.destroy() (used to cancel a
+    // transfer) emits 'close' but NOT 'error', and if we were parked waiting for
+    // a 'drain' that will now never come, the promise would otherwise hang
+    // forever — leaving the transfer stuck "active" so Cancel appears to do
+    // nothing. Handling 'close' guarantees the worker unwinds immediately.
+    const finish = (err) => {
+      if (done) return;
+      done = true;
+      socket.removeListener('error', onErr);
+      socket.removeListener('close', onClose);
+      socket.removeListener('drain', onDrain);
+      try { rs.destroy(); } catch (_) {}
+      if (err) reject(err); else resolve();
+    };
+    const onErr = (e) => finish(e || new Error('socket error'));
+    const onClose = () => finish(new Error('connection closed'));
+    const onDrain = () => rs.resume();
+
+    socket.on('error', onErr);
+    socket.on('close', onClose);
+    socket.on('drain', onDrain);
+
+    rs.on('error', (e) => finish(e));
     rs.on('data', (chunk) => {
+      if (done) return;
       sent += chunk.length;
-      if (!socket.write(chunk)) {
-        rs.pause();
-        socket.once('drain', () => rs.resume());
-      }
+      if (!socket.write(chunk)) rs.pause(); // resumed by the socket 'drain' above
     });
     rs.on('end', () => {
-      socket.removeListener('error', onSockErr);
-      if (sent !== length) reject(new Error('short read on ' + abs));
-      else resolve();
+      if (sent !== length) finish(new Error('short read on ' + abs));
+      else finish();
     });
   });
 }
@@ -842,10 +908,13 @@ async function sendPaths(opts) {
 module.exports = {
   DISCOVERY_PORT,
   DEFAULT_TRANSFER_PORT,
+  DEFAULT_SIGNAL_PORT,
   STREAMS,
   Discovery,
   TransferServer,
   sendPaths,
   collectEntries,
   primaryLocalIP,
+  frame,
+  FrameReader,
 };

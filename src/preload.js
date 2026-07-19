@@ -19,4 +19,11 @@ contextBridge.exposeInMainWorld('flux', {
   onTransfer: (fn) => ipcRenderer.on('transfer', (e, record) => fn(record)),
   onRequest: (fn) => ipcRenderer.on('request', (e, info) => fn(info)),
   onRequestResolved: (fn) => ipcRenderer.on('request-resolved', (e, id) => fn(id)),
+  // chat + call signaling
+  signalSend: (peerId, msg) => ipcRenderer.invoke('signal-send', { peerId, msg }),
+  onSignal: (fn) => ipcRenderer.on('signal', (e, data) => fn(data)),
+  // updates
+  checkUpdates: () => ipcRenderer.invoke('check-updates'),
+  openRelease: (url) => ipcRenderer.invoke('open-release', url),
+  onUpdateAvailable: (fn) => ipcRenderer.on('update-available', (e, info) => fn(info)),
 });

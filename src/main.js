@@ -1,10 +1,15 @@
 'use strict';
-const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell, nativeImage, Notification } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Tray, Menu, shell, nativeImage, Notification, session } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const https = require('https');
 const crypto = require('crypto');
 const { Discovery, TransferServer, sendPaths, primaryLocalIP, DEFAULT_TRANSFER_PORT } = require('./core');
+const { Signaling } = require('./signal');
+
+const REPO = 'Jhon12111/fluxdrop';
+const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000; // every 6 hours
 
 const SMOKE = process.argv.includes('--smoke');
 const START_HIDDEN = process.argv.includes('--hidden');
@@ -13,6 +18,7 @@ let win = null;
 let tray = null;
 let discovery = null;
 let transferServer = null;
+let signaling = null;
 let quitting = false;
 
 const transfers = new Map(); // id -> record
@@ -32,6 +38,7 @@ function loadSettings() {
     downloadDir: path.join(app.getPath('downloads'), 'FluxDrop'),
     autoLaunch: true,
     trustedDevices: [], // device ids that skip the approval prompt
+    lastNotifiedVersion: '', // newest version we've already alerted about
   };
   try {
     const raw = JSON.parse(fs.readFileSync(settingsPath(), 'utf8'));
@@ -82,6 +89,13 @@ function createWindow() {
     },
   });
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
+
+  if (SMOKE) {
+    win.webContents.on('console-message', (e, level, message) => {
+      if (level >= 2) console.log('RENDERER[' + level + ']: ' + message);
+    });
+    win.webContents.on('did-fail-load', (e, code, desc) => console.log('LOAD FAIL: ' + desc));
+  }
 
   win.on('close', (e) => {
     if (!quitting) {
@@ -184,6 +198,79 @@ function askApproval(info) {
   });
 }
 
+/* ------------------------------------------------------------ auto-update */
+
+/** Compare dotted numeric versions. Returns 1 if a>b, -1 if a<b, 0 if equal. */
+function compareVersions(a, b) {
+  const pa = String(a).split('.').map((n) => parseInt(n, 10) || 0);
+  const pb = String(b).split('.').map((n) => parseInt(n, 10) || 0);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d) return d > 0 ? 1 : -1;
+  }
+  return 0;
+}
+
+function fetchLatestRelease() {
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: 'api.github.com',
+      path: `/repos/${REPO}/releases/latest`,
+      method: 'GET',
+      headers: {
+        'User-Agent': 'FluxDrop-Updater',
+        Accept: 'application/vnd.github+json',
+      },
+      timeout: 10000,
+    }, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return reject(new Error('HTTP ' + res.statusCode)); }
+      let body = '';
+      res.on('data', (c) => { body += c; });
+      res.on('end', () => { try { resolve(JSON.parse(body)); } catch (e) { reject(e); } });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(new Error('timed out')); });
+    req.end();
+  });
+}
+
+/**
+ * Check GitHub for a newer release. On finding one, tell the window (banner)
+ * and — unless we've already alerted about this exact version — raise a desktop
+ * notification. `manual` forces the notification and returns a status string.
+ */
+async function checkForUpdates(manual = false) {
+  try {
+    const rel = await fetchLatestRelease();
+    const remote = String(rel.tag_name || '').replace(/^v/, '');
+    if (!remote) throw new Error('no version in release');
+    const current = app.getVersion();
+    if (compareVersions(remote, current) <= 0) {
+      return { ok: true, upToDate: true, current };
+    }
+    const info = { version: remote, url: rel.html_url, notes: String(rel.body || '').slice(0, 600) };
+    sendToUI('update-available', info);
+
+    if (manual || settings.lastNotifiedVersion !== remote) {
+      settings.lastNotifiedVersion = remote;
+      saveSettings();
+      if (Notification.isSupported()) {
+        const n = new Notification({
+          title: `FluxDrop ${remote} is available`,
+          body: 'A new version is ready to download — click to get it.',
+          icon: iconPath('icon.png'),
+        });
+        n.on('click', () => { showWindow(); shell.openExternal(info.url); });
+        n.show();
+      }
+    }
+    return { ok: true, upToDate: false, info };
+  } catch (err) {
+    if (manual) return { ok: false, error: err.message };
+    return null; // silent on automatic checks
+  }
+}
+
 async function startNetwork() {
   transferServer = new TransferServer({
     getDownloadDir: () => settings.downloadDir,
@@ -193,15 +280,58 @@ async function startNetwork() {
   transferServer.on('error', (err) => console.error('transfer server:', err.message));
   const port = await transferServer.start(DEFAULT_TRANSFER_PORT);
 
+  signaling = new Signaling({ id: settings.deviceId });
+  signaling.on('message', onSignalMessage);
+  signaling.on('error', (err) => console.error('signaling:', err.message));
+  const sport = await signaling.start();
+
   discovery = new Discovery({
     id: settings.deviceId,
     name: settings.deviceName,
     platform: process.platform === 'darwin' ? 'mac' : (process.platform === 'win32' ? 'windows' : 'linux'),
     transferPort: port,
+    signalPort: sport,
   });
   discovery.on('update', pushDevices);
   discovery.on('error', (err) => console.error('discovery:', err.message));
   await discovery.start();
+}
+
+/* ------------------------------------------------------- chat & call relay */
+
+// The renderer owns all chat/call logic (incl. WebRTC). Main just relays frames
+// between the signaling socket and the window, and raises OS notifications for
+// things that arrive while FluxDrop isn't focused.
+function peerNameFor(peerId) {
+  const dev = discovery && [...discovery.devices.values()].find((d) => d.id === peerId);
+  return dev ? dev.name : 'A device';
+}
+
+function onSignalMessage({ peerId, msg }) {
+  sendToUI('signal', { peerId, msg });
+
+  const focused = win && !win.isDestroyed() && win.isVisible() && win.isFocused();
+  if (msg.type === 'chat' && !focused && Notification.isSupported()) {
+    const n = new Notification({
+      title: `${peerNameFor(peerId)}`,
+      body: String(msg.text || '').slice(0, 140),
+      icon: iconPath('icon.png'),
+    });
+    n.on('click', showWindow);
+    n.show();
+  }
+  if (msg.type === 'call-invite') {
+    showWindow(); // bring the ringing UI to the front
+    if (!focused && Notification.isSupported()) {
+      const n = new Notification({
+        title: `${peerNameFor(peerId)} is calling…`,
+        body: 'Incoming voice call — click to answer',
+        icon: iconPath('icon.png'),
+      });
+      n.on('click', showWindow);
+      n.show();
+    }
+  }
 }
 
 async function doSend(deviceId, paths) {
@@ -352,6 +482,29 @@ function setupIpc() {
     saveSettings();
     return { ok: true };
   });
+
+  ipcMain.handle('check-updates', () => checkForUpdates(true));
+
+  ipcMain.handle('open-release', (e, url) => {
+    // only ever open our own release pages
+    if (typeof url === 'string' && url.startsWith('https://github.com/' + REPO)) {
+      shell.openExternal(url);
+      return { ok: true };
+    }
+    shell.openExternal('https://github.com/' + REPO + '/releases/latest');
+    return { ok: true };
+  });
+
+  // Relay a chat/call frame to a peer. The renderer passes the peer id; we look
+  // up its current ip/signal-port from discovery so a connection can be dialed
+  // on demand.
+  ipcMain.handle('signal-send', (e, { peerId, msg }) => {
+    if (!signaling) return { ok: false, error: 'not ready' };
+    const dev = [...discovery.devices.values()].find((d) => d.id === peerId);
+    const target = dev ? { id: dev.id, ip: dev.ip, sport: dev.sport } : peerId;
+    const ok = signaling.send(target, msg);
+    return { ok };
+  });
 }
 
 /* -------------------------------------------------------------------- boot */
@@ -365,10 +518,23 @@ if (!gotLock) {
   app.whenReady().then(async () => {
     loadSettings();
     applyAutoLaunch();
+
+    // Voice calls need the microphone. Grant it to our own pages only; deny
+    // everything else. (getUserMedia still respects the OS-level mic setting.)
+    session.defaultSession.setPermissionRequestHandler((wc, permission, cb) => {
+      cb(permission === 'media' || permission === 'mediaKeySystem');
+    });
+    session.defaultSession.setPermissionCheckHandler((wc, permission) =>
+      permission === 'media' || permission === 'mediaKeySystem');
+
     await startNetwork();
     setupIpc();
     createWindow();
     createTray();
+
+    // Check GitHub for a newer release shortly after launch, then periodically.
+    setTimeout(() => checkForUpdates(false), 8000);
+    setInterval(() => checkForUpdates(false), UPDATE_CHECK_INTERVAL_MS);
 
     if (SMOKE) {
       setTimeout(() => {
@@ -421,5 +587,6 @@ if (!gotLock) {
   app.on('will-quit', () => {
     if (discovery) discovery.stop();
     if (transferServer) transferServer.stop();
+    if (signaling) signaling.stop();
   });
 }

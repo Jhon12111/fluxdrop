@@ -28,12 +28,30 @@ full link speed — no internet, no cables, no size limits.
   app keeps receiving. Optional start-at-login.
 - **Drag & drop** — drop files onto a device card, or use Send Files /
   Send Folder buttons.
+- **Text chat** — message any device on the network right from its card; a
+  desktop notification and unread badge appear when the window isn't focused.
+- **Voice calls** — call another device over Wi‑Fi. The receiver gets a ringing
+  prompt and can Accept or Decline; audio flows peer-to-peer over WebRTC (no
+  server). Either side can hang up any time (button or `Esc`).
+- **Update alerts** — FluxDrop checks GitHub for new releases and shows a banner
+  and notification when one is available. Nothing installs automatically; you
+  choose when to download. Also under Settings → *Check for updates*.
+
+## Discovery / reliability
+
+Discovery uses UDP **multicast** (group `239.255.42.130`) alongside broadcast.
+Many Wi‑Fi access points silently drop client-to-client broadcast, which is the
+usual reason a Mac and a PC on the same Wi‑Fi don't see each other; multicast is
+forwarded far more reliably. If a device still doesn't appear, use **Connect by
+IP** and check both firewalls.
 
 ## Development
 
+See [CONTRIBUTING.md](CONTRIBUTING.md) for a full tour of the codebase.
+
 ```bash
 npm install
-npm test        # core engine selftest (transfer + integrity + discovery)
+npm test        # engine selftest (transfer + integrity + discovery) + cancel regression
 npm start       # run the app
 ```
 
@@ -51,14 +69,18 @@ first launch — click **Allow** on *Private networks*.
 
 ## Protocol (v2)
 
-- **Discovery**: UDP broadcast on port `52130`, JSON heartbeat every 2 s,
-  peers expire after 7 s. `bye` packet on shutdown.
+- **Discovery**: UDP multicast (`239.255.42.130`) + broadcast on port `52130`,
+  JSON heartbeat every 2 s, peers expire after 7 s. `bye` packet on shutdown.
 - **Transfer**: TCP on port `52131` (falls back to an ephemeral port, which is
   advertised in the discovery packet). Length-prefixed JSON control frames.
   - control socket: `offer` → `accept`/`reject` → chunk headers + payload → `done`
   - data sockets: `join` → chunk headers + payload
   - Every file is split into 8 MB chunks pulled from one shared work queue by
     all 4 streams; the receiver writes each chunk at its absolute offset.
+- **Signaling** (chat + calls): TCP on port `52132`, length-prefixed JSON. First
+  frame is a `hello` with the device id; then `chat` and `call-*` frames
+  (`call-invite`/`accept`/`reject`/`ice`/`hangup`). Voice media is WebRTC
+  peer-to-peer with LAN host candidates (no STUN/TURN).
 - Receiver sanitizes all paths (no `..`, no absolute paths, Windows-invalid
   characters stripped) and never executes anything it receives.
 
@@ -81,3 +103,13 @@ adapter's link speed. For maximum throughput use wired gigabit ethernet, or
 
 Both machines must be on the same network, and the network must allow
 peer-to-peer traffic (some guest/hotel Wi‑Fi networks isolate clients).
+
+## Contributing
+
+FluxDrop is open source and contributions are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md). Please run `npm test` and `npm run smoke`
+before opening a pull request.
+
+## License
+
+[MIT](LICENSE) © Ashik Mahmud

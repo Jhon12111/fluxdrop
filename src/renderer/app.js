@@ -6,6 +6,7 @@ const state = {
   transfers: new Map(), // id -> record
   requests: new Map(),  // id -> info
   speeds: new Map(),    // id -> { t, bytes, speed }
+  canceling: new Set(), // ids the user has asked to cancel (awaiting confirmation)
   settings: null,
   self: null,
 };
@@ -104,6 +105,7 @@ function renderDevices() {
     const card = document.createElement('div');
     card.className = 'device-card';
     card.dataset.id = dev.id;
+    const unread = window.Comms ? Comms.unread(dev.id) : 0;
     card.innerHTML = `
       <div class="device-top">
         <div class="device-avatar">${platformIcon(dev.platform)}</div>
@@ -116,10 +118,22 @@ function renderDevices() {
         <button class="btn primary grow" data-act="files">Send Files</button>
         <button class="btn secondary grow" data-act="folder">Send Folder</button>
       </div>
+      <div class="device-comm">
+        <button class="btn ghost grow" data-act="chat">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M4 4h16a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1H8l-4 4V5a1 1 0 0 1 1-1z"/></svg>
+          Message${unread ? ` <span class="msg-badge">${unread}</span>` : ''}
+        </button>
+        <button class="btn ghost grow" data-act="call">
+          <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M6.6 10.8c1.4 2.8 3.8 5.1 6.6 6.6l2.2-2.2c.3-.3.7-.4 1-.2 1.1.4 2.3.6 3.6.6.6 0 1 .4 1 1V20c0 .6-.4 1-1 1C10.6 21 3 13.4 3 4c0-.6.4-1 1-1h3.4c.6 0 1 .4 1 1 0 1.2.2 2.4.6 3.6.1.4 0 .8-.3 1l-2.1 2.2z"/></svg>
+          Call
+        </button>
+      </div>
       <div class="device-hint">or drag &amp; drop files here</div>
     `;
     card.querySelector('[data-act="files"]').addEventListener('click', () => flux.pickAndSend(dev.id, 'files'));
     card.querySelector('[data-act="folder"]').addEventListener('click', () => flux.pickAndSend(dev.id, 'folder'));
+    card.querySelector('[data-act="chat"]').addEventListener('click', () => window.Comms && Comms.openChat(dev.id));
+    card.querySelector('[data-act="call"]').addEventListener('click', () => window.Comms && Comms.startCall(dev.id));
 
     card.addEventListener('dragover', (e) => { e.preventDefault(); card.classList.add('drag-over'); });
     card.addEventListener('dragleave', () => card.classList.remove('drag-over'));
@@ -183,7 +197,9 @@ function renderTransfers() {
       <div class="t-right">
         <div class="t-speed">${r.state === 'active' ? fmtSpeed(speed) : fmtBytes(r.totalBytes)}</div>
         ${r.state === 'active' || r.state === 'pending'
-          ? `<button class="t-cancel" data-id="${r.id}">Cancel</button>`
+          ? (state.canceling.has(r.id)
+              ? `<button class="t-cancel" disabled>Canceling…</button>`
+              : `<button class="t-cancel" data-id="${r.id}">Cancel</button>`)
           : `<div class="t-state ${r.state}">${r.state === 'done' ? '✓ ' + (isRecv ? 'Received' : 'Sent') : ''}</div>`}
       </div>
     `;
@@ -202,6 +218,7 @@ function openSettings() {
   const n = state.settings.trustedCount || 0;
   $('trustedRow').hidden = n === 0;
   $('trustedText').textContent = `${n} trusted device${n === 1 ? '' : 's'} skip the approval prompt.`;
+  $('verText').textContent = state.self ? `v${state.self.version}` : '';
   $('settingsModal').showModal();
 }
 
@@ -236,6 +253,13 @@ async function init() {
   $('selfName').textContent = st.self.name;
   $('selfIp').textContent = `${st.self.ip} · v${st.self.version}`;
 
+  if (window.Comms) {
+    Comms.init({
+      getDevice: (id) => state.devices.find((d) => d.id === id),
+      onUnread: () => renderDevices(),
+    });
+  }
+
   renderDevices();
   renderTransfers();
   renderRequests();
@@ -259,8 +283,19 @@ async function init() {
     state.transfers.set(record.id, record);
     if (record.state === 'active') computeSpeed(record);
     else state.speeds.delete(record.id);
+    if (record.state !== 'active' && record.state !== 'pending') state.canceling.delete(record.id);
     renderTransfers();
   });
+
+  // update banner
+  let updateInfo = null;
+  flux.onUpdateAvailable((info) => {
+    updateInfo = info;
+    $('updateText').textContent = `FluxDrop ${info.version} is available.`;
+    $('updateBanner').hidden = false;
+  });
+  $('btnUpdateGet').addEventListener('click', () => flux.openRelease(updateInfo && updateInfo.url));
+  $('btnUpdateDismiss').addEventListener('click', () => { $('updateBanner').hidden = true; });
 
   $('btnSettings').addEventListener('click', openSettings);
   $('contactDev').addEventListener('click', (e) => { e.preventDefault(); flux.contactDeveloper(); });
@@ -272,7 +307,8 @@ async function init() {
   // Delegated cancel — survives the periodic re-render of the transfer list.
   $('transferList').addEventListener('click', (e) => {
     const btn = e.target.closest('.t-cancel');
-    if (!btn) return;
+    if (!btn || !btn.dataset.id) return;
+    state.canceling.add(btn.dataset.id);
     btn.disabled = true;
     btn.textContent = 'Canceling…';
     flux.cancelTransfer(btn.dataset.id);
@@ -316,6 +352,15 @@ async function init() {
     await flux.forgetTrusted();
     state.settings.trustedCount = 0;
     $('trustedRow').hidden = true;
+  });
+  $('btnCheckUpdate').addEventListener('click', async () => {
+    const btn = $('btnCheckUpdate');
+    btn.disabled = true; btn.textContent = 'Checking…';
+    const res = await flux.checkUpdates();
+    if (res && res.ok && res.upToDate) btn.textContent = "You're up to date ✓";
+    else if (res && res.ok && res.info) btn.textContent = `v${res.info.version} available — see banner`;
+    else btn.textContent = 'Check failed — try again';
+    setTimeout(() => { btn.disabled = false; btn.textContent = 'Check for updates'; }, 4000);
   });
   $('btnChooseDir').addEventListener('click', async () => {
     const dir = await flux.chooseDownloadDir();
